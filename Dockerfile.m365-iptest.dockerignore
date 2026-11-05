@@ -1,0 +1,15 @@
+.git
+**/node_modules
+**/.env
+**/.env.*
+**/secrets.json
+**/msal-cache.json
+**/credentials.enc
+**/identity-vault.key
+**/console.db
+**/console.db-*
+**/browser-profile
+**/login-debug
+**/frames
+**/*.log
+M365_upload_*

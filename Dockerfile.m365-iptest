@@ -1,0 +1,20 @@
+# TEST ONLY. This image permits credential configuration over unencrypted HTTP.
+FROM node:24-bookworm
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+WORKDIR /app
+RUN npm install --global pnpm@10
+COPY . .
+# Patch is scoped to this image only; the GitHub checkout stays unchanged.
+RUN node scripts/enable-console.mjs \
+ && node scripts/m365-ip-http-patch.mjs \
+ && pnpm install --no-frozen-lockfile \
+ && pnpm build \
+ && pnpm console:test \
+ && node --test packages/console/tests/ip-http-test.test.mjs \
+ && pnpm --filter @m365-copilot/core exec playwright install --with-deps chromium \
+ && mkdir -p /ms-playwright /data \
+ && chown -R node:node /ms-playwright /home/node /data
+ENV NODE_ENV=production
+USER node
+EXPOSE 4142
+CMD ["node", "packages/console/server.mjs"]

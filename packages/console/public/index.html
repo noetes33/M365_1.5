@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+ <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+ <title>M365 Console | 管理控制台</title>
+ <link rel="stylesheet" href="/admin/style.css"><script defer src="/admin/app.js"></script>
+</head>
+<body>
+ <div id="auth-screen" class="auth-screen">
+   <div class="login-backdrop"><span class="glow-a"></span><span class="glow-b"></span></div>
+   <div class="auth-card">
+     <div class="auth-brand"><span class="logo-icon">M<span>◆</span></span><span>M365 Console</span></div>
+     <div class="auth-eyebrow">SECURE MANAGEMENT PORTAL</div>
+     <h1>欢迎回来</h1><p>管理你的 M365 Copilot 网关、渠道与 API 访问权限。</p>
+     <form id="login-form"><label>登录邮箱<input name="email" autocomplete="username" type="email" value="admin@local" required></label><label>登录密码<input name="password" autocomplete="current-password" type="password" placeholder="输入管理密码" required></label><button class="btn btn-primary full" type="submit">登录控制台 <span>→</span></button></form>
+     <div id="login-error" class="form-error"></div>
+     <div class="auth-footer"><span class="online-dot"></span> 本地优先 · 网页不收集微软密码，服务器可选配置</div>
+   </div>
+   <div class="auth-side"><div class="auth-side-graphic"><div class="planet ring-one"></div><div class="planet ring-two"></div><span class="graphic-center">M365</span></div><div class="auth-pitch">One gateway.<br><em>Complete control.</em></div><p>面向已获授权 Microsoft 365 Copilot 连接的可视化管理方案。</p></div>
+ </div>
+ <div id="dashboard-app" class="app hidden">
+   <aside class="sidebar">
+     <div class="side-brand"><div class="brand-logo">M<span>◆</span></div><div><strong>M365 Console</strong><small>Administration</small></div></div>
+     <div class="workspace-switch"><span class="workspace-mark">◇</span><span>默认工作空间<small>本地网关控制台</small></span><span class="updown">⌄</span></div>
+     <div class="section-title">概览</div>
+     <nav id="sidebar-nav"><button class="nav-item active" data-tab="overview"><span class="nav-symbol">▦</span> 仪表盘</button><button class="nav-item" data-tab="usage"><span class="nav-symbol">◷</span> 用量记录</button>
+     <div class="section-title">资源管理</div>
+     <button class="nav-item manage-only" data-tab="accounts"><span class="nav-symbol">◉</span> 微软账号</button><button class="nav-item manage-only" data-tab="channels"><span class="nav-symbol">⇆</span> 渠道管理</button><button class="nav-item" data-tab="models"><span class="nav-symbol">◈</span> 模型与额度</button>
+     <div class="section-title">访问管理</div>
+     <button class="nav-item manage-only" data-tab="users"><span class="nav-symbol">♧</span> 用户管理</button><button class="nav-item" data-tab="keys"><span class="nav-symbol">⌑</span> API 密钥</button>
+     <div class="section-title manage-only">系统</div>
+     <button class="nav-item manage-only" data-tab="audit"><span class="nav-symbol">≡</span> 审计日志</button><button class="nav-item manage-only" data-tab="settings"><span class="nav-symbol">⚙</span> 系统设置</button></nav>
+     <div class="side-bottom"><div class="side-health"><span class="health-icon">●</span><div><strong>本地安全模式</strong><small>仅监听 127.0.0.1</small></div></div><button id="logout" class="logout">退出登录 <span>↗</span></button></div>
+   </aside>
+   <div class="main-column">
+      <header class="topbar"><button id="menu-toggle" class="menu-toggle" aria-label="菜单">☰</button><div class="breadcrumbs">控制台 <span>/</span> <strong id="crumb">仪表盘</strong></div><div class="top-actions"><span class="secure-chip"><span class="green-dot"></span> 本地运行</span><button id="top-refresh" class="icon-button" title="刷新">↻</button><span class="user-avatar" id="user-avatar">A</span><span id="user-name" class="user-name">管理员</span></div></header>
+      <main id="page" class="main-content"></main>
+      <footer class="main-footer">M365 Console v1.3 · OpenAI-compatible gateway · 仅限授权环境使用</footer>
+   </div>
+ </div>
+ <div id="modal" class="modal-shade hidden" role="dialog" aria-modal="true"><div class="dialog"><div class="dialog-head"><h2 id="modal-title">操作</h2><button class="icon-button" id="close-modal" aria-label="关闭">×</button></div><div id="modal-body"></div></div></div>
+ <div id="toast" class="toast hidden" role="status"></div>
+</body>
+</html>

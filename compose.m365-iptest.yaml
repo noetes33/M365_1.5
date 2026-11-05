@@ -1,0 +1,38 @@
+name: m365-console-v15-test
+services:
+  console:
+    container_name: m365-console-v15-test
+    build:
+      context: .
+      dockerfile: Dockerfile.m365-iptest
+    image: local/m365-console:v1.5-http-test
+    # Explicitly public port for the user's temporary IP+HTTP test.
+    ports:
+      - '0.0.0.0:4142:4142'
+    init: true
+    restart: unless-stopped
+    user: '1000:1000'
+    environment:
+      M365_ADMIN_HOST: '0.0.0.0'
+      M365_ADMIN_PORT: '4142'
+      M365_ADMIN_DATA: /data
+      M365_CONSOLE_CONFIG_DIR: /data/legacy
+      M365_CACHE_FILE: /data/legacy/msal-cache.json
+      M365_BROWSER_PROFILE: /data/legacy/browser-profile
+      M365_NO_INTERACTIVE: '1'
+      M365_CONSOLE_AUTOLOGIN_ON_BOOT: '1'
+      M365_HTTP_TEST_MODE: '1'
+      PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
+    env_file:
+      - /opt/m365-console-v15/console.env
+    volumes:
+      - /opt/m365-console-v15/data:/data
+    shm_size: '1gb'
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:4142/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 4
+      start_period: 60s

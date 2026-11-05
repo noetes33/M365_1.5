@@ -1,0 +1,16 @@
+{
+  "name": "@m365-copilot/console",
+  "version": "1.4.0",
+  "private": true,
+  "type": "module",
+  "description": "Integrated local admin and authorized API gateway for m365-copilot-proxy",
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test tests/*.test.mjs"
+  },
+  "dependencies": {
+    "@m365-copilot/proxy-lib": "workspace:*",
+    "@m365-copilot/core": "workspace:*"
+  }
+}
