@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { readFileSync } from 'node:fs';
 import { openStore,uuid,hash,scrypt,safeJSON,now,audit,publicUser,publicKey,publicAccount,publicChannel } from './store.mjs';
 import { requestUpstream, isEmbedded, embeddedState, configureAccounts } from './embedded.mjs';
-import { accountStatus, accountReady, beginAuthorizedLogin, beginAutomatedLogin, hasAutoSecrets, unlinkAccount, shutdownWorkers } from './account-manager.mjs';
+import { accountStatus, accountReady, beginAuthorizedLogin, beginAutomatedLogin, hasAutoSecrets, importExternalMsalCache, retryImportedCacheVerification, unlinkAccount, shutdownWorkers } from './account-manager.mjs';
 import {saveCredentials,eraseCredentials} from './credential-vault.mjs';
 
 const ROOT=path.dirname(fileURLToPath(import.meta.url));
@@ -194,6 +194,31 @@ const adminRoutes = async(req,res,route,parts)=>{
    const a=db.one('SELECT * FROM accounts WHERE id=?',parts[2]);if(!a)return fail(res,404,'账号不存在');
    if(a.runtime_type!=='isolated')return fail(res,400,'该账号是旧版档案，请创建独立授权账号');
    try{const result=await beginAuthorizedLogin(DATA,a);audit(db,user.id,'accounts.authorize',a.id,'管理员启动本机交互式登录');return json(res,202,result);}catch(e){return fail(res,409,e.message);}
+ }
+ if(parts[1]==='accounts'&&parts.length===4&&parts[3]==='import-msal-cache'&&method==='POST'){
+   if(!requireRole(res,user,['admin']))return;
+   const a=db.one('SELECT * FROM accounts WHERE id=?',parts[2]);
+   if(!a||a.runtime_type!=='isolated')return fail(res,404,'独立微软账号不存在');
+   // Deliberately NOT bypassed by M365_HTTP_TEST_MODE: the entire serialized
+   // cache includes long-lived credentials, so cleartext transport is unsafe.
+   if(!secureCredentialTransport(req))return fail(res,403,'外部授权缓存只能通过 HTTPS 导入；当前 HTTP 测试入口不支持');
+   if(!checkMinute('msal-import:'+user.id,5))return fail(res,429,'外部缓存导入操作过于频繁');
+   const b=await input(req,1200*1024);
+   if(typeof b.admin_password!=='string'||b.admin_password.length>1024)return fail(res,403,'请重新输入管理后台密码');
+   const checked=scrypt(b.admin_password,user.salt);
+   if(!crypto.timingSafeEqual(Buffer.from(checked,'hex'),Buffer.from(user.password_hash,'hex')))return fail(res,403,'管理员密码不正确');
+   try{
+     const result=await importExternalMsalCache(DATA,a,b.msal_cache);
+     audit(db,user.id,'accounts.msal_cache_import',a.id,'管理员通过 HTTPS 导入已有 MSAL 会话缓存；未记录 Token');
+     return json(res,202,result);
+   }catch(e){return fail(res,e.status===400?400:409,e.status===400?e.message:'导入缓存失败：'+(e.message==='Account authorization in progress'?'账号当前正在授权':'请确认缓存格式及账户配置'));}
+ }
+ if(parts[1]==='accounts'&&parts.length===4&&parts[3]==='verify-msal-cache'&&method==='POST'){
+   if(!requireRole(res,user,['admin']))return;
+   const a=db.one('SELECT * FROM accounts WHERE id=?',parts[2]);
+   if(!a||a.runtime_type!=='isolated')return fail(res,404,'独立微软账号不存在');
+   try{return json(res,202,await retryImportedCacheVerification(DATA,a));}
+   catch{return fail(res,409,'当前没有可验证的导入缓存，或正在执行授权');}
  }
  if(parts[1]==='accounts'&&parts.length===4&&parts[3]==='credentials'&&['PUT','DELETE'].includes(method)){
    if(!requireRole(res,user,['admin']))return;

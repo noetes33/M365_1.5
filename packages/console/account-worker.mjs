@@ -63,25 +63,28 @@ process.on('message',async m=>{
   if(m?.type==='bootstrap'&&typeof m.secret==='string'&&m.secret.length>=64&&!secret){
     secret=m.secret;api.listen(0,'127.0.0.1',()=>process.send?.({type:'ready',port:api.address().port}));
   }
-  if(['authorize','auto-authorize'].includes(m?.type)&&secret&&!authorizing){
+  if(['authorize','auto-authorize','verify-cache'].includes(m?.type)&&secret&&!authorizing){
     authorizing=true;
     try{
-      const automated=m.type==='auto-authorize';
+      const automated=m.type==='auto-authorize',cacheOnly=m.type==='verify-cache';
       // Never request an invisible interactive window during headless login.
-      process.env.M365_NO_INTERACTIVE=automated?'1':'0';process.env.M365_ENABLE_INTERACTIVE_APPROVAL=automated?'0':'1';
+      process.env.M365_NO_INTERACTIVE=(automated||cacheOnly)?'1':'0';process.env.M365_ENABLE_INTERACTIVE_APPROVAL=(automated||cacheOnly)?'0':'1';
       try{
         if(automated){
-          if(m.credentials?.email!==email||typeof m.credentials?.password!=='string'||typeof m.credentials?.mfaSecret!=='string')throw Error('Credential identity mismatch');
+          if(String(m.credentials?.email||'').trim().toLowerCase()!==email)throw Error('Credential identity mismatch');
+          if(typeof m.credentials?.password!=='string'||!m.credentials.password)throw Error('Password is missing');
+          if(typeof m.credentials?.mfaSecret!=='string'||!m.credentials.mfaSecret)throw Error('TOTP seed is missing');
           writeFileSync(runtimeSecretPath,JSON.stringify(m.credentials),{mode:0o600,flag:'wx'});
         }
         const {getToken}=await mod();if(typeof getToken!=='function')throw Error('Missing core getToken');
-        await getToken();
+        const accessToken=await getToken();
+        if(cacheOnly&&(!accessToken||typeof accessToken!=='string'))throw Error('Silent token validation returned no access token');
       }finally{rmSync(runtimeSecretPath,{force:true});}
       const verified=identity();if(!verified.ok)throw Error(verified.reason);
       process.send?.({type:'auth-result',ok:true,email:verified.email});
     }catch(e){
       const msg=String(e?.message||'');
-      const label=msg.includes('identity')||msg.includes('Tenant ID')||msg.includes('email')?'账号邮箱或租户与后台配置不一致':msg.includes('Timed out')?'登录超时':m.type==='auto-authorize'?'自动登录失败，请检查本机凭证以及组织认证要求':'登录未完成，请在本机检查 Microsoft 登录窗口和组织认证要求';
+      const label=msg.includes('Credential identity')?'自动登录凭证的邮箱与当前档案不匹配':msg.includes('Microsoft identity')?'微软登录身份与当前档案邮箱不匹配':msg.includes('Tenant ID')?'微软账号租户 ID 不匹配':msg.includes('Password is missing')?'未配置微软账号密码':msg.includes('TOTP seed is missing')?'未配置 TOTP 种子':msg.includes('Account has not been authorized')?'授权失败：未生成有效 MSAL 身份缓存':msg.includes('Multiple or missing identities')?'MSAL 缓存缺少身份或包含多个账号':msg.includes('Timed out')?'微软认证超时':cacheOnly?'导入缓存的静默取 Token 失败；可能过期、权限不符或需再次 MFA':automated?'自动登录失败；请检查凭证与组织 MFA 要求':'登录未完成，请在微软官方登录窗口完成授权';
       process.send?.({type:'auth-result',ok:false,error:label});
     }
     finally{process.env.M365_NO_INTERACTIVE='1';process.env.M365_ENABLE_INTERACTIVE_APPROVAL='0';authorizing=false;}

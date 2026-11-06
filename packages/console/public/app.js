@@ -45,9 +45,9 @@ function renderOverview(){const {stats,today,count,trend,recent,me,modelStats=[]
  $('#page').innerHTML=head('仪表盘',`欢迎回来，${esc(me.name)}。查看平台用量和各项资源状态。`,btn('↻ 刷新数据','refresh'))+statsHTML+`<div class="two-columns"><div class="panel-card"><div class="card-head"><h3>请求趋势</h3><span class="summary-label">最近 7 天</span></div><p class="card-subtitle">按实际请求条数统计，不代表 Token 消耗</p>${chart}</div><div class="panel-card"><div class="card-head"><h3>平台概况</h3><span class="status-pill">● 正常运行</span></div><p class="card-subtitle">多用户访问控制与额度核算</p>${capabilities}<div class="health-line"><span>有效密钥记录</span><strong>${count.keys}</strong></div><div class="health-line"><span>平均响应耗时</span><strong>${stats.avgLatency} ms</strong></div><div class="health-line"><span>我的额度</span><strong>${nquota(me.quota_units)} / 已用 ${int(me.used_units)}</strong></div></div></div>`+section('最近请求',table(['时间','模型','结果','耗时'],recentRows),'最近 6 条')+`<div class="two-columns"><div class="panel-card"><h3>模型使用分布</h3><p class="card-subtitle">按请求次数排名</p>${modelStats.length?modelStats.map(m=>`<div class="health-line"><span class="mono">${esc(m.model)}</span><strong>${int(m.requests)} 次 · ${int(m.units)} 积分</strong></div>`).join(''):'<p class="empty">暂无用量</p>'}</div><div class="panel-card"><h3>用户请求排行</h3><p class="card-subtitle">管理端可见全部用户的请求汇总</p>${userTop.length?userTop.map(u=>`<div class="health-line"><span>${esc(u.name)}</span><strong>${int(u.requests)} 次 · ${int(u.units)} 积分</strong></div>`).join(''):'<p class="empty">暂无统计</p>'}</div></div>`;
 }
 function renderAccounts(){const counts={};for(const c of data.channels)counts[c.account_id]=(counts[c.account_id]||0)+1;
- const statusText={legacy:'旧版共享核心', 'not-linked':'未授权',cached:'已缓存（未验证）',authorized:'授权成功',authorizing:'授权进行中', 'identity-mismatch':'登录邮箱不匹配','tenant-mismatch':'租户不匹配',ambiguous:'缓存包含多种身份',error:'认证失败'};
+ const statusText={legacy:'旧版共享核心', 'not-linked':'未授权',cached:'已缓存（未验证）',authorized:'授权成功',authorizing:'授权进行中', 'identity-mismatch':'登录邮箱不匹配','tenant-mismatch':'租户不匹配','verification-required':'外部缓存待验证',ambiguous:'缓存包含多种身份',error:'认证失败'};
  const rows=data.accounts.map(a=>{const state=a.auth?.state||'not-linked',valid=['cached','authorized'].includes(state),isolated=a.runtime_type==='isolated';
-   const controls=admin()?(isolated?tiny('配置自动登录','configure-auto',a.id)+(a.auth?.autoLoginConfigured?tiny('自动登录','auto-login-account',a.id)+tiny('清除凭证','remove-auto',a.id,true):'')+tiny('本机授权（仅桌面）','authorize-account',a.id)+tiny('刷新状态','refresh-account',a.id)+tiny('解除关联','unlink-account',a.id,true):'')+tiny('编辑','edit-account',a.id)+tiny('删除','delete-account',a.id,true):'—';
+   const controls=admin()?(isolated?tiny('配置自动登录','configure-auto',a.id)+(a.auth?.autoLoginConfigured?tiny('自动登录','auto-login-account',a.id)+tiny('清除凭证','remove-auto',a.id,true):'')+tiny('导入外部 MSAL 缓存','import-msal-cache',a.id)+(a.auth?.state==='verification-required'?tiny('重试缓存验证','verify-msal-cache',a.id):'')+tiny('本机授权（仅桌面）','authorize-account',a.id)+tiny('刷新状态','refresh-account',a.id)+tiny('解除关联','unlink-account',a.id,true):'')+tiny('编辑','edit-account',a.id)+tiny('删除','delete-account',a.id,true):'—';
    return `<tr><td>${cell(a.label,a.email_hint||'未绑定账号')}${isolated?`<span class="sub-cell">自动登录：${a.auth?.autoLoginConfigured?'已配置':'未配置'}</span>`:''}</td><td class="mono">${esc(a.tenant_hint||'—')}</td><td>${counts[a.id]||0} 个</td><td>${badge(a.enabled)}</td><td><span class="status-pill ${valid?'':'off'}" title="${esc(a.auth?.error||'')}">${esc(statusText[state]||state)}</span></td><td><div class="action-cell">${controls}</div></td></tr>`;});
  $('#page').innerHTML=head('微软账号管理','每个独立账号采用专属凭证缓存和工作进程。验证登录邮箱后才能供已授权用户使用。',admin()?btn('＋ 添加微软账号','add-account','','btn-primary'):'')+`<div class="help-box"><strong>如何使用：</strong>点击「添加微软账号」填写信息，再点「配置自动登录」在 HTTPS 管理网页中提交密码和软件 TOTP Base32 种子，最后点「自动登录」。凭证由服务端加密保存，不写入 SQLite、不会再次显示。请只添加你拥有或获得明确授权的账号。微软仍可能要求推送 MFA、FIDO2 或组织验证；遇到这种情况自动登录不能取代官方验证。</div>`+section('账号列表',table(['账号','租户别名','渠道','启用','认证状态','操作'],rows),`${data.accounts.length} 个账号`);
 }
@@ -83,6 +83,16 @@ async function action(name,id){if(name==='refresh')return showTab(tab);
  if(name==='add-account'){popup('添加微软账号档案',accountForm(),async p=>{await api('/accounts','POST',{...p});});return;}
  if(name==='edit-account'){const a=data.accounts.find(x=>x.id===id);popup('编辑微软账号档案',accountForm(a),async p=>api('/accounts/'+id,'PATCH',p));return;}
  if(name==='copy-account-id'){await navigator.clipboard.writeText(id);notice('账号 ID 已复制');return;}
+ if(name==='import-msal-cache'){
+   const a=data.accounts.find(x=>x.id===id);if(!a)return;
+   popup('导入外部 MSAL 授权缓存：'+a.label,formFields(`<div class="help-box warning-box">这里不是粘贴 AT / RT 的单独字符串，而是同一 OAuth 客户端已合法登录生成的完整 MSAL JSON 缓存（Account、AccessToken、RefreshToken 等）。仅限本人账号，必须使用 HTTPS；公共 HTTP 测试入口会拒绝导入。缓存含有长期凭证，请勿发到 GitHub 或聊天窗口。导入后后台将尝试静默获取 Token，失败时需重新完成微软官方授权。</div>`+textarea('msal_cache','完整 MSAL JSON 缓存')+field('admin_password','再次输入管理后台登录密码','','password','required autocomplete="current-password"')),async p=>{
+     const result=await api('/accounts/'+id+'/import-msal-cache','POST',p);
+     notice(result.message||'已开始验证导入缓存');return result;
+   });return;
+ }
+ if(name==='verify-msal-cache'){
+   const r=await api('/accounts/'+id+'/verify-msal-cache','POST',{});notice(r.message||'正在验证缓存');await showTab('accounts');return;
+ }
  if(name==='configure-auto'){
    const a=data.accounts.find(x=>x.id===id);
    if(!a)return;

@@ -7,6 +7,7 @@ import {mkdirSync, readFileSync, existsSync, rmSync, chmodSync} from 'node:fs';
 import {join, resolve} from 'node:path';
 import {accountDir,autoSecretPath} from './account-paths.mjs';
 import {vaultPresent,readCredentials} from './credential-vault.mjs';
+import {cacheImportPending,clearCacheImportPending,saveImportedCache,validateCacheImport} from './msal-cache-import.mjs';
 import {fileURLToPath} from 'node:url';
 
 const ROOT=resolve(fileURLToPath(new URL('.', import.meta.url)));
@@ -43,7 +44,8 @@ function identityStatus(a, cached){
   return cached;
 }
 export function accountStatus(dataRoot,a){
-  const base=identityStatus(a,cachedIdentity(dataRoot,a.id));
+  let base=identityStatus(a,cachedIdentity(dataRoot,a.id));
+  if(a.runtime_type==='isolated'&&base.state==='cached'&&cacheImportPending(dataRoot,a.id))base={...base,state:'verification-required'};
   const running=runtimes.get(a.id);
   if(!running)return {...base,worker:'stopped',autoLoginConfigured:a.runtime_type==='isolated'&&hasAutoSecrets(dataRoot,a.id)};
   return {...base,worker:running.child.exitCode===null?'running':'stopped',
@@ -81,7 +83,7 @@ export async function startWorker(dataRoot,a){
   const child=spawn(process.execPath,[WORKER],{cwd:ROOT,env,stdio:['ignore','ignore','pipe','ipc'],windowsHide:true});
   const entry={child,secret,port:null,loginPending:false,verified:false,authError:null,readyPromise:null};
   runtimes.set(a.id,entry);
-  // Upstream can be noisy and include sensitive error text. Never relay logs to the browser.
+  // Upstream can contain sensitive data; never log raw stderr or forward it.
   child.stderr.on('data',()=>{});
   child.on('exit',()=>{entry.port=null;entry.loginPending=false;entry.verified=false;});
   entry.readyPromise=new Promise((resolve,reject)=>{
@@ -98,41 +100,71 @@ export async function startWorker(dataRoot,a){
   }).catch(e=>{if(runtimes.get(a.id)===entry)runtimes.delete(a.id);entry.readyPromise=null;throw e;});
   return entry.readyPromise;
 }
+function awaitAuthenticationResult(entry, dataRoot, a, imported=false){
+  const handler=m=>{
+    if(m?.type!=='auth-result')return;
+    entry.child.off('message',handler);
+    entry.loginPending=false;
+    entry.verified=!!m.ok;
+    entry.authError=m.ok?null:String(m.error||'Authorization failed').slice(0,160);
+    if(m.ok&&imported)clearCacheImportPending(dataRoot,a.id);
+  };
+  entry.child.on('message',handler);
+  entry.child.once('exit',()=>entry.child.off('message',handler));
+  return handler;
+}
+function sendAuthentication(entry,type,options={},dataRoot=null,a=null,imported=false){
+  if(entry.loginPending)throw new Error('An authorization is already in progress');
+  entry.loginPending=true;
+  entry.authError=null;
+  entry.verified=false;
+  const handler=awaitAuthenticationResult(entry,dataRoot,a,imported);
+  try{entry.child.send({type,...options});}
+  catch(e){entry.child.off('message',handler);entry.loginPending=false;entry.authError='授权工作进程通信失败';throw e;}
+}
 export async function beginAuthorizedLogin(dataRoot,a){
   if(!a.enabled)throw new Error('Account is disabled');
   if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(a.email_hint||''))throw new Error('An expected Microsoft email is required');
   const entry=await startWorker(dataRoot,a);
-  if(entry.loginPending)throw new Error('An authorization is already in progress');
-  entry.loginPending=true;entry.authError=null;
-  // Deliberately no login URL or OAuth code returned to the web page. The upstream
-  // opens a local visible browser and the user completes Microsoft authentication.
-  entry.child.once('message',function onAuth(m){
-    if(m?.type!=='auth-result'){
-      entry.child.once('message',onAuth);return;
-    }
-    entry.loginPending=false;entry.verified=!!m.ok;
-    if(!m.ok)entry.authError=String(m.error||'Authorization failed').slice(0,160);
-  });
-  entry.child.send({type:'authorize'});
+  sendAuthentication(entry,'authorize',{},dataRoot,a);
   return {state:'authorizing',message:'请在运行本服务的电脑上完成微软授权窗口中的登录和 MFA 验证。'};
 }
 export async function beginAutomatedLogin(dataRoot,a){
   if(a.runtime_type!=='isolated'||!a.enabled)throw new Error('Account is not an enabled isolated profile');
   if(!hasAutoSecrets(dataRoot,a.id))throw new Error('No local password/TOTP credentials have been configured for this account');
-  const entry=await startWorker(dataRoot,a);
-  if(entry.loginPending)throw new Error('An authorization is already in progress');
-  entry.loginPending=true;entry.authError=null;
-  entry.child.once('message',function onAuth(m){
-    if(m?.type!=='auth-result'){entry.child.once('message',onAuth);return;}
-    entry.loginPending=false;entry.verified=!!m.ok;
-    if(!m.ok)entry.authError=String(m.error||'Authorization failed').slice(0,160);
-  });
-  // Encrypted records are decrypted only in memory; the isolated worker creates
-  // a temporary file for the upstream module while login is in progress.
+  // Decrypt and validate BEFORE setting loginPending. On bad input the account
+  // must remain retryable instead of getting stuck in 'authorizing'.
   const credentials=readCredentials(dataRoot,a.id)||JSON.parse(readFileSync(autoSecretPath(dataRoot,a.id),'utf8'));
-  if(credentials.email?.toLowerCase()!==a.email_hint?.toLowerCase())throw Error('Credential identity mismatch');
-  entry.child.send({type:'auto-authorize',credentials});
-  return {state:'authorizing',message:'已开始使用服务器本机配置的账号凭证尝试登录。若需要额外 MFA，请改用本机授权。'};
+  if(mail(credentials.email)!==mail(a.email_hint))throw Error('Credential identity mismatch');
+  const entry=await startWorker(dataRoot,a);
+  sendAuthentication(entry,'auto-authorize',{credentials},dataRoot,a);
+  return {state:'authorizing',message:'已开始使用服务器本机配置的账号凭证尝试登录。如微软要求推送验证，须按其官方登录要求操作。'};
+}
+async function stopWorkerForCacheReload(id){
+  const entry=runtimes.get(id);
+  if(!entry)return;
+  if(entry.loginPending)throw new Error('Account authorization in progress');
+  runtimes.delete(id);
+  if(entry.child.exitCode===null){
+    entry.child.kill();
+    await Promise.race([new Promise(resolve=>entry.child.once('exit',resolve)),new Promise(resolve=>setTimeout(resolve,3000))]);
+  }
+}
+export async function importExternalMsalCache(dataRoot,a,raw){
+  if(a.runtime_type!=='isolated'||!a.enabled)throw new Error('只支持已经启用的独立微软账号');
+  // Reject malformed/mismatched input before stopping a healthy account worker.
+  validateCacheImport(raw,a.email_hint,a.tenant_hint||'');
+  await stopWorkerForCacheReload(a.id);
+  const result=saveImportedCache(dataRoot,a.id,a.email_hint,a.tenant_hint||'',raw);
+  const entry=await startWorker(dataRoot,a);
+  sendAuthentication(entry,'verify-cache',{},dataRoot,a,true);
+  return {state:'authorizing',message:'完整 MSAL 缓存已写入专属账号目录。正在尝试静默获取 Token；请刷新授权状态，验证成功后再测试模型。',identity:result.email};
+}
+export async function retryImportedCacheVerification(dataRoot,a){
+  if(!cacheImportPending(dataRoot,a.id))throw new Error('没有等待验证的导入缓存');
+  const entry=await startWorker(dataRoot,a);
+  sendAuthentication(entry,'verify-cache',{},dataRoot,a,true);
+  return {state:'authorizing',message:'正在重试验证已导入的 MSAL 缓存'};
 }
 export async function accountRequest(dataRoot,a,endpoint,options={},scope='internal'){
   if(!accountReady(dataRoot,a))throw new Error('Microsoft account not authorized or identity mismatch');
