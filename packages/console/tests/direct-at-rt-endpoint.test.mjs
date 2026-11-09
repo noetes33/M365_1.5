@@ -38,15 +38,16 @@ before(async()=>{
  assert.equal(r.status,201);id=r.json.data.id;
 });
 after(()=>{server?.kill();rmSync(DATA,{recursive:true,force:true});});
-test('endpoint requires login, HTTPS, CSRF and admin password',async()=>{
+test('HTTP endpoint still requires login, CSRF and admin password',async()=>{
  const url='/accounts/'+id+'/import-at-rt',p={access_token:at,refresh_token:rt,admin_password:adminPassword};
  assert.equal((await api(url,'POST',p,false,true)).status,401);
- assert.equal((await api(url,'POST',p,true,false)).status,403);
- assert.equal((await api(url,'POST',{...p,admin_password:'wrong'},true,true)).status,403);
+ const noCsrf=await fetch(base+'/admin/api'+url,{method:'POST',headers:{Cookie:cookie,'Content-Type':'application/json'},body:JSON.stringify(p)});
+ assert.equal(noCsrf.status,403);
+ assert.equal((await api(url,'POST',{...p,admin_password:'wrong'},true,false)).status,403);
 });
 test('two input fields are sufficient and no tokens leak in responses or audit',async()=>{
  const p={access_token:at,refresh_token:rt,admin_password:adminPassword};
- const r=await api('/accounts/'+id+'/import-at-rt','POST',p,true,true);
+ const r=await api('/accounts/'+id+'/import-at-rt','POST',p,true,false);
  assert.equal(r.status,202,JSON.stringify(r.json));
  for(let i=0;i<100;i++){
   const st=(await api('/accounts/'+id+'/status')).json.data;

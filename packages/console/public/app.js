@@ -86,7 +86,7 @@ async function action(name,id){if(name==='refresh')return showTab(tab);
  if(name==='import-at-rt'){
    const a=data.accounts.find(x=>x.id===id);if(!a)return;
    popup('直接填写 AT 和 RT：'+a.label,formFields(
-     `<div class="help-box warning-box">只填写外部登录后获得的两个令牌。AT 必须属于此账号且可访问 Microsoft 365 Copilot Sydney。RT 将用于后续尝试静默续期。必须通过 HTTPS 提交，页面不会回显令牌。</div>`+
+     `<div class="help-box warning-box">只填写外部登录后获得的两个令牌。AT 必须属于此账号且可访问 Microsoft 365 Copilot Sydney。RT 将用于后续尝试静默续期。页面不会回显令牌。</div>`+
      textarea('access_token','Access Token (AT)')+
      textarea('refresh_token','Refresh Token (RT)')+
      field('admin_password','再次输入管理后台登录密码','','password','required autocomplete="current-password"')
