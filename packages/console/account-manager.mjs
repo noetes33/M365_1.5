@@ -8,7 +8,7 @@ import {join, resolve} from 'node:path';
 import {accountDir,autoSecretPath} from './account-paths.mjs';
 import {vaultPresent,readCredentials} from './credential-vault.mjs';
 import {cacheImportPending,clearCacheImportPending,saveImportedCache,validateCacheImport} from './msal-cache-import.mjs';
-import {buildMsalCacheFromTokens} from './manual-token-import.mjs';
+import {buildMsalCacheFromTokens,identityFromRefreshToken,readExistingAccountCache,inspectAccessToken} from './manual-token-import.mjs';
 import {fileURLToPath} from 'node:url';
 
 const ROOT=resolve(fileURLToPath(new URL('.', import.meta.url)));
@@ -44,12 +44,29 @@ function identityStatus(a, cached){
     return {...cached,state:'tenant-mismatch'};
   return cached;
 }
+function accessTokenStatus(dataRoot,id){
+  // JWE has no readable claims; never report its fabricated MSAL expiry as real.
+  try{
+    const cache=JSON.parse(readFileSync(join(accountDir(dataRoot,id),'msal-cache.json'),'utf8'));
+    const at=Object.values(cache.AccessToken||{})[0];
+    if(!at||typeof at.secret!=='string')return null;
+    const info=inspectAccessToken(at.secret);
+    if(info.format==='jwe'){
+      // The imported opaque AT is deliberately cached as expired (cachedAt=1).
+      // If MSAL later refreshes it, MSAL saves real expiry metadata.
+      const exp=Number(at.expiresOn),cached=Number(at.cachedAt);
+      const refreshed=Number.isSafeInteger(exp)&&exp>Math.floor(Date.now()/1000)&&cached>1;
+      return {format:'jwe',expiresAt:refreshed?exp:null,expirySource:refreshed?'msal-cache-after-refresh':'unknown'};
+    }
+    return {format:'jwt',expiresAt:info.expiresAt,expirySource:'jwt-claim-unverified'};
+  }catch{return null;}
+}
 export function accountStatus(dataRoot,a){
   let base=identityStatus(a,cachedIdentity(dataRoot,a.id));
   if(a.runtime_type==='isolated'&&base.state==='cached'&&cacheImportPending(dataRoot,a.id))base={...base,state:'verification-required'};
   const running=runtimes.get(a.id);
-  if(!running)return {...base,worker:'stopped',autoLoginConfigured:a.runtime_type==='isolated'&&hasAutoSecrets(dataRoot,a.id)};
-  return {...base,worker:running.child.exitCode===null?'running':'stopped',
+  if(!running)return {...base,token:accessTokenStatus(dataRoot,a.id),worker:'stopped',autoLoginConfigured:a.runtime_type==='isolated'&&hasAutoSecrets(dataRoot,a.id)};
+  return {...base,token:accessTokenStatus(dataRoot,a.id),worker:running.child.exitCode===null?'running':'stopped',
     state:running.authError? 'error':running.loginPending?'authorizing':running.verified && base.state==='cached'?'authorized':base.state,
     error:running.authError||null,autoLoginConfigured:a.runtime_type==='isolated'&&hasAutoSecrets(dataRoot,a.id)};
 }
@@ -101,27 +118,39 @@ export async function startWorker(dataRoot,a){
   }).catch(e=>{if(runtimes.get(a.id)===entry)runtimes.delete(a.id);entry.readyPromise=null;throw e;});
   return entry.readyPromise;
 }
-function awaitAuthenticationResult(entry, dataRoot, a, imported=false){
-  const handler=m=>{
-    if(m?.type!=='auth-result')return;
-    entry.child.off('message',handler);
-    entry.loginPending=false;
-    entry.verified=!!m.ok;
-    entry.authError=m.ok?null:String(m.error||'Authorization failed').slice(0,160);
-    if(m.ok&&imported)clearCacheImportPending(dataRoot,a.id);
-  };
-  entry.child.on('message',handler);
-  entry.child.once('exit',()=>entry.child.off('message',handler));
-  return handler;
-}
+// Every verification operation has a bounded lifetime. Expired/stalled MSAL
+// requests must never lock the admin UI at "authorizing" indefinitely.
 function sendAuthentication(entry,type,options={},dataRoot=null,a=null,imported=false){
   if(entry.loginPending)throw new Error('An authorization is already in progress');
   entry.loginPending=true;
   entry.authError=null;
   entry.verified=false;
-  const handler=awaitAuthenticationResult(entry,dataRoot,a,imported);
+  const timeoutMs=type==='verify-cache'?25000:180000;
+  let completed=false;
+  let timer;
+  const finish=(m)=>{
+    if(completed)return;
+    completed=true;
+    clearTimeout(timer);
+    entry.child.off('message',onMessage);
+    entry.child.off('exit',onExit);
+    entry.loginPending=false;
+    entry.verified=!!m.ok;
+    entry.authError=m.ok?null:String(m.error||'Microsoft authorization failed').slice(0,160);
+    if(m.ok&&imported)clearCacheImportPending(dataRoot,a.id);
+  };
+  const onMessage=m=>{if(m?.type==='auth-result')finish(m);};
+  const onExit=()=>finish({ok:false,error:'账号工作进程在完成认证前退出'});
+  entry.child.on('message',onMessage);
+  entry.child.on('exit',onExit);
+  timer=setTimeout(()=>{
+    finish({ok:false,error:type==='verify-cache'?'Token 静默验证超时（25 秒）；请核对 RT 客户端、权限或网络':'微软交互认证超时'});
+    // The worker may be hung inside acquireTokenSilent: replace it on retry.
+    if(entry.child.exitCode===null)entry.child.kill();
+  },timeoutMs);
+  timer.unref?.();
   try{entry.child.send({type,...options});}
-  catch(e){entry.child.off('message',handler);entry.loginPending=false;entry.authError='授权工作进程通信失败';throw e;}
+  catch(e){finish({ok:false,error:'授权工作进程通信失败'});throw e;}
 }
 export async function beginAuthorizedLogin(dataRoot,a){
   if(!a.enabled)throw new Error('Account is disabled');
@@ -164,14 +193,23 @@ export async function importExternalMsalCache(dataRoot,a,raw){
 /** Import two independent AT / RT strings; MSAL cache creation is internal. */
 export async function importExternalAtRt(dataRoot,a,at,rt){
   if(a.runtime_type!=='isolated'||!a.enabled)throw new Error('只支持已经启用的独立微软账号');
-  // Validate before replacing any existing Microsoft authorization.
-  const built=buildMsalCacheFromTokens(at,rt,a.email_hint,a.tenant_hint||'');
+  // JWT contains readable claims. JWE is encrypted: reuse a previously linked
+  // identity, or ask Microsoft's OAuth service for an ID Token using this RT.
+  const existing=readExistingAccountCache(dataRoot,a.id);
+  let built;
+  try{
+    built=buildMsalCacheFromTokens(at,rt,a.email_hint,a.tenant_hint||'',existing?{existingCache:existing}:{});
+  }catch(e){
+    if(!['JWE 需要已关联的账号身份缓存','JWE 是加密 AT','认证记录缺少有效的租户 tid 或账号 oid','已有账号缓存无法解析'].some(x=>String(e.message).includes(x)))throw e;
+    const recovered=await identityFromRefreshToken(rt,a.email_hint,a.tenant_hint||'');
+    built=buildMsalCacheFromTokens(at,recovered.refreshToken,a.email_hint,a.tenant_hint||'',{identity:recovered.identity});
+  }
   validateCacheImport(built.cache,a.email_hint,a.tenant_hint||'');
   await stopWorkerForCacheReload(a.id);
   saveImportedCache(dataRoot,a.id,a.email_hint,a.tenant_hint||'',built.cache);
   const entry=await startWorker(dataRoot,a);
   sendAuthentication(entry,'verify-cache',{},dataRoot,a,true);
-  return {state:'authorizing',message:'AT 与 RT 已保存到独立账号缓存，正在通过 MSAL 尝试静默认证。后续续期取决于 RT 是否属于该客户端。',accessExpiresAt:built.accessExpiresAt};
+  return {state:'authorizing',message:built.tokenFormat==='jwe'?'JWE AT 已保存；其到期时间未知，正在尝试使用 RT 取得目标服务的有效 Token。':'AT 与 RT 已保存，正在通过 MSAL 尝试静默认证。',accessExpiresAt:built.accessExpiresAt,tokenFormat:built.tokenFormat};
 }
 
 export async function retryImportedCacheVerification(dataRoot,a){

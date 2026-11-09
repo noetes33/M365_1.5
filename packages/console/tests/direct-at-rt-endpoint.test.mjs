@@ -62,3 +62,23 @@ test('two input fields are sufficient and no tokens leak in responses or audit',
  // success criterion is the isolated worker verification, not cached bytes.
  assert.ok(cached.includes('owner@example.edu'));
 });
+test('HTTP direct import accepts JWE when this account already has linked identity',async()=>{
+ const {saveManualTokens}=await import('../manual-token-import.mjs');
+ // Restore a linked identity (mock getToken writes an identity-only cache).
+ saveManualTokens(DATA,id,'owner@example.edu',tid,at,rt);
+ const jweHeader=Buffer.from(JSON.stringify({alg:'RSA-OAEP',enc:'A128CBC-HS256',zip:'DEF'})).toString('base64url');
+ const jwe=[jweHeader,'a'.repeat(100),'b'.repeat(20),'c'.repeat(200),'d'.repeat(30)].join('.');
+ const result=await api('/accounts/'+id+'/import-at-rt','POST',{
+   access_token:jwe,refresh_token:rt,admin_password:adminPassword
+ });
+ assert.equal(result.status,202,JSON.stringify(result.json));
+ assert.equal(result.json.tokenFormat,'jwe');
+ assert.equal(result.json.accessExpiresAt,null);
+ assert.doesNotMatch(JSON.stringify(result.json),new RegExp(rt));
+ for(let i=0;i<100;i++){
+  const status=(await api('/accounts/'+id+'/status')).json.data;
+  if(status.state==='authorized')break;
+  if(i===99)assert.fail('JWE import was not verified by mock provider: '+JSON.stringify(status));
+  await new Promise(r=>setTimeout(r,40));
+ }
+});

@@ -46,9 +46,10 @@ function renderOverview(){const {stats,today,count,trend,recent,me,modelStats=[]
 }
 function renderAccounts(){const counts={};for(const c of data.channels)counts[c.account_id]=(counts[c.account_id]||0)+1;
  const statusText={legacy:'旧版共享核心', 'not-linked':'未授权',cached:'已缓存（未验证）',authorized:'授权成功',authorizing:'授权进行中', 'identity-mismatch':'登录邮箱不匹配','tenant-mismatch':'租户不匹配','verification-required':'外部缓存待验证',ambiguous:'缓存包含多种身份',error:'认证失败'};
+ const tokenHint=a=>a.auth?.token?('AT 类型：'+a.auth.token.format.toUpperCase()+'；到期信息：'+(a.auth.token.expiresAt?new Date(a.auth.token.expiresAt*1000).toLocaleString():'未知（加密令牌）')):'';
  const rows=data.accounts.map(a=>{const state=a.auth?.state||'not-linked',valid=['cached','authorized'].includes(state),isolated=a.runtime_type==='isolated';
    const controls=admin()?(isolated?tiny('配置自动登录','configure-auto',a.id)+(a.auth?.autoLoginConfigured?tiny('自动登录','auto-login-account',a.id)+tiny('清除凭证','remove-auto',a.id,true):'')+tiny('填写 AT / RT','import-at-rt',a.id)+(a.auth?.state==='verification-required'?tiny('重试缓存验证','verify-msal-cache',a.id):'')+tiny('本机授权（仅桌面）','authorize-account',a.id)+tiny('刷新状态','refresh-account',a.id)+tiny('解除关联','unlink-account',a.id,true):'')+tiny('编辑','edit-account',a.id)+tiny('删除','delete-account',a.id,true):'—';
-   return `<tr><td>${cell(a.label,a.email_hint||'未绑定账号')}${isolated?`<span class="sub-cell">自动登录：${a.auth?.autoLoginConfigured?'已配置':'未配置'}</span>`:''}</td><td class="mono">${esc(a.tenant_hint||'—')}</td><td>${counts[a.id]||0} 个</td><td>${badge(a.enabled)}</td><td><span class="status-pill ${valid?'':'off'}" title="${esc(a.auth?.error||'')}">${esc(statusText[state]||state)}</span></td><td><div class="action-cell">${controls}</div></td></tr>`;});
+   return `<tr><td>${cell(a.label,a.email_hint||'未绑定账号')}${isolated?`<span class="sub-cell">自动登录：${a.auth?.autoLoginConfigured?'已配置':'未配置'}</span>`:''}</td><td class="mono">${esc(a.tenant_hint||'—')}</td><td>${counts[a.id]||0} 个</td><td>${badge(a.enabled)}</td><td><span class="status-pill ${valid?'':'off'}" title="${esc([a.auth?.error,tokenHint(a)].filter(Boolean).join('；'))}">${esc(statusText[state]||state)}</span></td><td><div class="action-cell">${controls}</div></td></tr>`;});
  $('#page').innerHTML=head('微软账号管理','每个独立账号采用专属凭证缓存和工作进程。验证登录邮箱后才能供已授权用户使用。',admin()?btn('＋ 添加微软账号','add-account','','btn-primary'):'')+`<div class="help-box"><strong>如何使用：</strong>点击「添加微软账号」填写信息，再点「配置自动登录」在 HTTPS 管理网页中提交密码和软件 TOTP Base32 种子，最后点「自动登录」。凭证由服务端加密保存，不写入 SQLite、不会再次显示。请只添加你拥有或获得明确授权的账号。微软仍可能要求推送 MFA、FIDO2 或组织验证；遇到这种情况自动登录不能取代官方验证。</div>`+section('账号列表',table(['账号','租户别名','渠道','启用','认证状态','操作'],rows),`${data.accounts.length} 个账号`);
 }
 function renderChannels(){const accounts=Object.fromEntries(data.accounts.map(x=>[x.id,x.label]));const rows=data.channels.map(c=>`<tr><td>${cell(c.name,accounts[c.account_id]||'未绑定')}</td><td class="mono">${esc(c.upstream)}</td><td>${badge(c.enabled)}</td><td>${c.priority} / ${c.weight}</td><td>${c.concurrency_limit}</td><td><span id="health-${esc(c.id)}" class="status-pill pending">未检测</span></td><td><div class="action-cell">${tiny('检查','probe-channel',c.id)}${admin()?tiny('编辑','edit-channel',c.id)+tiny('删除','delete-channel',c.id,true):''}</div></td></tr>`);
@@ -86,7 +87,7 @@ async function action(name,id){if(name==='refresh')return showTab(tab);
  if(name==='import-at-rt'){
    const a=data.accounts.find(x=>x.id===id);if(!a)return;
    popup('直接填写 AT 和 RT：'+a.label,formFields(
-     `<div class="help-box warning-box">只填写外部登录后获得的两个令牌。AT 必须属于此账号且可访问 Microsoft 365 Copilot Sydney。RT 将用于后续尝试静默续期。页面不会回显令牌。</div>`+
+     `<div class="help-box warning-box">只填写 AT 和 RT。支持普通 JWT 和五段式加密 JWE。加密 AT 的过期时间不能从令牌中直接读取；后台会尝试通过 RT 获取目标服务 Token，并显示实际验证结果。</div>`+
      textarea('access_token','Access Token (AT)')+
      textarea('refresh_token','Refresh Token (RT)')+
      field('admin_password','再次输入管理后台登录密码','','password','required autocomplete="current-password"')

@@ -84,7 +84,7 @@ process.on('message',async m=>{
       process.send?.({type:'auth-result',ok:true,email:verified.email});
     }catch(e){
       const msg=String(e?.message||'');
-      const label=msg.includes('Credential identity')?'自动登录凭证的邮箱与当前档案不匹配':msg.includes('Microsoft identity')?'微软登录身份与当前档案邮箱不匹配':msg.includes('Tenant ID')?'微软账号租户 ID 不匹配':msg.includes('Password is missing')?'未配置微软账号密码':msg.includes('TOTP seed is missing')?'未配置 TOTP 种子':msg.includes('Account has not been authorized')?'授权失败：未生成有效 MSAL 身份缓存':msg.includes('Multiple or missing identities')?'MSAL 缓存缺少身份或包含多个账号':msg.includes('Timed out')?'微软认证超时':cacheOnly?'导入缓存的静默取 Token 失败；可能过期、权限不符或需再次 MFA':automated?'自动登录失败；请检查凭证与组织 MFA 要求':'登录未完成，请在微软官方登录窗口完成授权';
+      const label=msg.includes('Credential identity')?'自动登录凭证的邮箱与当前档案不匹配':msg.includes('Microsoft identity')?'微软登录身份与当前档案邮箱不匹配':msg.includes('Tenant ID')?'微软账号租户 ID 不匹配':msg.includes('Password is missing')?'未配置微软账号密码':msg.includes('TOTP seed is missing')?'未配置 TOTP 种子':msg.includes('Account has not been authorized')?'授权失败：未生成有效 MSAL 身份缓存':msg.includes('Multiple or missing identities')?'MSAL 缓存缺少身份或包含多个账号':msg.includes('Timed out')?'微软认证超时':cacheOnly?'静默获取目标服务 Token 失败：RT 可能与客户端不匹配、权限不足或需要重新登录':automated?'自动登录失败；请检查凭证与组织 MFA 要求':'登录未完成，请在微软官方登录窗口完成授权';
       process.send?.({type:'auth-result',ok:false,error:label});
     }
     finally{process.env.M365_NO_INTERACTIVE='1';process.env.M365_ENABLE_INTERACTIVE_APPROVAL='0';authorizing=false;}
