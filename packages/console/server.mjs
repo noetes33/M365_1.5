@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { readFileSync } from 'node:fs';
 import { openStore,uuid,hash,scrypt,safeJSON,now,audit,publicUser,publicKey,publicAccount,publicChannel } from './store.mjs';
 import { requestUpstream, isEmbedded, embeddedState, configureAccounts } from './embedded.mjs';
-import { accountStatus, accountReady, beginAuthorizedLogin, beginAutomatedLogin, hasAutoSecrets, importExternalMsalCache, retryImportedCacheVerification, unlinkAccount, shutdownWorkers } from './account-manager.mjs';
+import { accountStatus, accountReady, beginAuthorizedLogin, beginAutomatedLogin, hasAutoSecrets, importExternalMsalCache, importExternalAtRt, retryImportedCacheVerification, unlinkAccount, shutdownWorkers } from './account-manager.mjs';
 import {saveCredentials,eraseCredentials} from './credential-vault.mjs';
 
 const ROOT=path.dirname(fileURLToPath(import.meta.url));
@@ -194,6 +194,24 @@ const adminRoutes = async(req,res,route,parts)=>{
    const a=db.one('SELECT * FROM accounts WHERE id=?',parts[2]);if(!a)return fail(res,404,'账号不存在');
    if(a.runtime_type!=='isolated')return fail(res,400,'该账号是旧版档案，请创建独立授权账号');
    try{const result=await beginAuthorizedLogin(DATA,a);audit(db,user.id,'accounts.authorize',a.id,'管理员启动本机交互式登录');return json(res,202,result);}catch(e){return fail(res,409,e.message);}
+ }
+ // Direct AT / RT form: never return either value, and never accept public HTTP.
+ if(parts[1]==='accounts'&&parts.length===4&&parts[3]==='import-at-rt'&&method==='POST'){
+   if(!requireRole(res,user,['admin']))return;
+   const a=db.one('SELECT * FROM accounts WHERE id=?',parts[2]);
+   if(!a||a.runtime_type!=='isolated')return fail(res,404,'独立微软账号不存在');
+   if(!secureCredentialTransport(req))return fail(res,403,'AT 和 RT 只能通过 HTTPS 管理后台提交');
+   if(!checkMinute('at-rt-import:'+user.id,5))return fail(res,429,'Token 保存操作过于频繁');
+   const b=await input(req,140*1024);
+   if(typeof b.admin_password!=='string'||b.admin_password.length>1024)return fail(res,403,'请重新输入管理后台密码');
+   const checked=scrypt(b.admin_password,user.salt);
+   if(!crypto.timingSafeEqual(Buffer.from(checked,'hex'),Buffer.from(user.password_hash,'hex')))
+     return fail(res,403,'管理员密码不正确');
+   try{
+     const result=await importExternalAtRt(DATA,a,b.access_token,b.refresh_token);
+     audit(db,user.id,'accounts.at_rt_import',a.id,'管理员通过 HTTPS 导入 AT 与 RT；未记录任何 Token');
+     return json(res,202,result);
+   }catch(e){return fail(res,e.status===400?400:409,e.status===400?e.message:'AT / RT 保存或认证失败，请检查账号及 Token 对应的客户端');}
  }
  if(parts[1]==='accounts'&&parts.length===4&&parts[3]==='import-msal-cache'&&method==='POST'){
    if(!requireRole(res,user,['admin']))return;

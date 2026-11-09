@@ -47,7 +47,7 @@ function renderOverview(){const {stats,today,count,trend,recent,me,modelStats=[]
 function renderAccounts(){const counts={};for(const c of data.channels)counts[c.account_id]=(counts[c.account_id]||0)+1;
  const statusText={legacy:'旧版共享核心', 'not-linked':'未授权',cached:'已缓存（未验证）',authorized:'授权成功',authorizing:'授权进行中', 'identity-mismatch':'登录邮箱不匹配','tenant-mismatch':'租户不匹配','verification-required':'外部缓存待验证',ambiguous:'缓存包含多种身份',error:'认证失败'};
  const rows=data.accounts.map(a=>{const state=a.auth?.state||'not-linked',valid=['cached','authorized'].includes(state),isolated=a.runtime_type==='isolated';
-   const controls=admin()?(isolated?tiny('配置自动登录','configure-auto',a.id)+(a.auth?.autoLoginConfigured?tiny('自动登录','auto-login-account',a.id)+tiny('清除凭证','remove-auto',a.id,true):'')+tiny('导入外部 MSAL 缓存','import-msal-cache',a.id)+(a.auth?.state==='verification-required'?tiny('重试缓存验证','verify-msal-cache',a.id):'')+tiny('本机授权（仅桌面）','authorize-account',a.id)+tiny('刷新状态','refresh-account',a.id)+tiny('解除关联','unlink-account',a.id,true):'')+tiny('编辑','edit-account',a.id)+tiny('删除','delete-account',a.id,true):'—';
+   const controls=admin()?(isolated?tiny('配置自动登录','configure-auto',a.id)+(a.auth?.autoLoginConfigured?tiny('自动登录','auto-login-account',a.id)+tiny('清除凭证','remove-auto',a.id,true):'')+tiny('填写 AT / RT','import-at-rt',a.id)+(a.auth?.state==='verification-required'?tiny('重试缓存验证','verify-msal-cache',a.id):'')+tiny('本机授权（仅桌面）','authorize-account',a.id)+tiny('刷新状态','refresh-account',a.id)+tiny('解除关联','unlink-account',a.id,true):'')+tiny('编辑','edit-account',a.id)+tiny('删除','delete-account',a.id,true):'—';
    return `<tr><td>${cell(a.label,a.email_hint||'未绑定账号')}${isolated?`<span class="sub-cell">自动登录：${a.auth?.autoLoginConfigured?'已配置':'未配置'}</span>`:''}</td><td class="mono">${esc(a.tenant_hint||'—')}</td><td>${counts[a.id]||0} 个</td><td>${badge(a.enabled)}</td><td><span class="status-pill ${valid?'':'off'}" title="${esc(a.auth?.error||'')}">${esc(statusText[state]||state)}</span></td><td><div class="action-cell">${controls}</div></td></tr>`;});
  $('#page').innerHTML=head('微软账号管理','每个独立账号采用专属凭证缓存和工作进程。验证登录邮箱后才能供已授权用户使用。',admin()?btn('＋ 添加微软账号','add-account','','btn-primary'):'')+`<div class="help-box"><strong>如何使用：</strong>点击「添加微软账号」填写信息，再点「配置自动登录」在 HTTPS 管理网页中提交密码和软件 TOTP Base32 种子，最后点「自动登录」。凭证由服务端加密保存，不写入 SQLite、不会再次显示。请只添加你拥有或获得明确授权的账号。微软仍可能要求推送 MFA、FIDO2 或组织验证；遇到这种情况自动登录不能取代官方验证。</div>`+section('账号列表',table(['账号','租户别名','渠道','启用','认证状态','操作'],rows),`${data.accounts.length} 个账号`);
 }
@@ -83,6 +83,18 @@ async function action(name,id){if(name==='refresh')return showTab(tab);
  if(name==='add-account'){popup('添加微软账号档案',accountForm(),async p=>{await api('/accounts','POST',{...p});});return;}
  if(name==='edit-account'){const a=data.accounts.find(x=>x.id===id);popup('编辑微软账号档案',accountForm(a),async p=>api('/accounts/'+id,'PATCH',p));return;}
  if(name==='copy-account-id'){await navigator.clipboard.writeText(id);notice('账号 ID 已复制');return;}
+ if(name==='import-at-rt'){
+   const a=data.accounts.find(x=>x.id===id);if(!a)return;
+   popup('直接填写 AT 和 RT：'+a.label,formFields(
+     `<div class="help-box warning-box">只填写外部登录后获得的两个令牌。AT 必须属于此账号且可访问 Microsoft 365 Copilot Sydney。RT 将用于后续尝试静默续期。必须通过 HTTPS 提交，页面不会回显令牌。</div>`+
+     textarea('access_token','Access Token (AT)')+
+     textarea('refresh_token','Refresh Token (RT)')+
+     field('admin_password','再次输入管理后台登录密码','','password','required autocomplete="current-password"')
+   ),async p=>{
+     const result=await api('/accounts/'+id+'/import-at-rt','POST',p);
+     notice(result.message||'AT / RT 已提交，正在验证');return result;
+   });return;
+ }
  if(name==='import-msal-cache'){
    const a=data.accounts.find(x=>x.id===id);if(!a)return;
    popup('导入外部 MSAL 授权缓存：'+a.label,formFields(`<div class="help-box warning-box">这里不是粘贴 AT / RT 的单独字符串，而是同一 OAuth 客户端已合法登录生成的完整 MSAL JSON 缓存（Account、AccessToken、RefreshToken 等）。仅限本人账号，必须使用 HTTPS；公共 HTTP 测试入口会拒绝导入。缓存含有长期凭证，请勿发到 GitHub 或聊天窗口。导入后后台将尝试静默获取 Token，失败时需重新完成微软官方授权。</div>`+textarea('msal_cache','完整 MSAL JSON 缓存')+field('admin_password','再次输入管理后台登录密码','','password','required autocomplete="current-password"')),async p=>{

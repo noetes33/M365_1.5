@@ -8,6 +8,7 @@ import {join, resolve} from 'node:path';
 import {accountDir,autoSecretPath} from './account-paths.mjs';
 import {vaultPresent,readCredentials} from './credential-vault.mjs';
 import {cacheImportPending,clearCacheImportPending,saveImportedCache,validateCacheImport} from './msal-cache-import.mjs';
+import {buildMsalCacheFromTokens} from './manual-token-import.mjs';
 import {fileURLToPath} from 'node:url';
 
 const ROOT=resolve(fileURLToPath(new URL('.', import.meta.url)));
@@ -160,6 +161,19 @@ export async function importExternalMsalCache(dataRoot,a,raw){
   sendAuthentication(entry,'verify-cache',{},dataRoot,a,true);
   return {state:'authorizing',message:'完整 MSAL 缓存已写入专属账号目录。正在尝试静默获取 Token；请刷新授权状态，验证成功后再测试模型。',identity:result.email};
 }
+/** Import two independent AT / RT strings; MSAL cache creation is internal. */
+export async function importExternalAtRt(dataRoot,a,at,rt){
+  if(a.runtime_type!=='isolated'||!a.enabled)throw new Error('只支持已经启用的独立微软账号');
+  // Validate before replacing any existing Microsoft authorization.
+  const built=buildMsalCacheFromTokens(at,rt,a.email_hint,a.tenant_hint||'');
+  validateCacheImport(built.cache,a.email_hint,a.tenant_hint||'');
+  await stopWorkerForCacheReload(a.id);
+  saveImportedCache(dataRoot,a.id,a.email_hint,a.tenant_hint||'',built.cache);
+  const entry=await startWorker(dataRoot,a);
+  sendAuthentication(entry,'verify-cache',{},dataRoot,a,true);
+  return {state:'authorizing',message:'AT 与 RT 已保存到独立账号缓存，正在通过 MSAL 尝试静默认证。后续续期取决于 RT 是否属于该客户端。',accessExpiresAt:built.accessExpiresAt};
+}
+
 export async function retryImportedCacheVerification(dataRoot,a){
   if(!cacheImportPending(dataRoot,a.id))throw new Error('没有等待验证的导入缓存');
   const entry=await startWorker(dataRoot,a);
