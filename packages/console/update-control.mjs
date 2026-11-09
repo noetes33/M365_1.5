@@ -3,7 +3,7 @@ import {readFileSync,writeFileSync,mkdirSync,openSync,closeSync,unlinkSync,exist
 import {join} from 'node:path';
 import {randomUUID} from 'node:crypto';
 
-export const RELEASE_VERSION='2.0.0';
+export const RELEASE_VERSION='2.1.0';
 const readJson=(file)=>{try{return JSON.parse(readFileSync(file,'utf8'));}catch{return null;}};
 export function updateOverview(dataRoot){
   const root=join(dataRoot,'updates');

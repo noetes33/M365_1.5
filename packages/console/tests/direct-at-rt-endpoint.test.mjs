@@ -49,36 +49,29 @@ test('two input fields are sufficient and no tokens leak in responses or audit',
  const p={access_token:at,refresh_token:rt,admin_password:adminPassword};
  const r=await api('/accounts/'+id+'/import-at-rt','POST',p,true,false);
  assert.equal(r.status,202,JSON.stringify(r.json));
- for(let i=0;i<100;i++){
-  const st=(await api('/accounts/'+id+'/status')).json.data;
-  if(st.state==='authorized')break;
-  if(i===99)assert.fail('Not authorized: '+JSON.stringify(st));
-  await new Promise(ok=>setTimeout(ok,40));
- }
+ const status=(await api('/accounts/'+id+'/status')).json.data;
+ assert.equal(status.state,'manual-ready-to-test');
+ assert.equal(status.manual.mode,'at-rt');
  const views=await Promise.all(['/accounts','/accounts/'+id+'/status','/audit'].map(u=>api(u)));
  for(const v of views){assert.doesNotMatch(JSON.stringify(v.json),new RegExp(rt));assert.doesNotMatch(JSON.stringify(v.json),/eyJhbGciOiJSUzI1NiI/);}
- const cached=readFileSync(join(DATA,'identity-profiles',id,'msal-cache.json'),'utf8');
- // The mock verifier may replace the cache with a stripped identity; the API
- // success criterion is the isolated worker verification, not cached bytes.
+ const cached=readFileSync(join(DATA,'identity-profiles',id,'manual-at-rt.json'),'utf8');
+ // The manual mode waits for a real chat test; it does not call MSAL during import.
  assert.ok(cached.includes('owner@example.edu'));
 });
-test('HTTP direct import accepts JWE when this account already has linked identity',async()=>{
- const {saveManualTokens}=await import('../manual-token-import.mjs');
- // Restore a linked identity (mock getToken writes an identity-only cache).
- saveManualTokens(DATA,id,'owner@example.edu',tid,at,rt);
- const jweHeader=Buffer.from(JSON.stringify({alg:'RSA-OAEP',enc:'A128CBC-HS256',zip:'DEF'})).toString('base64url');
- const jwe=[jweHeader,'a'.repeat(100),'b'.repeat(20),'c'.repeat(200),'d'.repeat(30)].join('.');
- const result=await api('/accounts/'+id+'/import-at-rt','POST',{
-   access_token:jwe,refresh_token:rt,admin_password:adminPassword
- });
- assert.equal(result.status,202,JSON.stringify(result.json));
- assert.equal(result.json.tokenFormat,'jwe');
- assert.equal(result.json.accessExpiresAt,null);
- assert.doesNotMatch(JSON.stringify(result.json),new RegExp(rt));
- for(let i=0;i<100;i++){
-  const status=(await api('/accounts/'+id+'/status')).json.data;
-  if(status.state==='authorized')break;
-  if(i===99)assert.fail('JWE import was not verified by mock provider: '+JSON.stringify(status));
-  await new Promise(r=>setTimeout(r,40));
- }
+test('manual AT/RT account can send a test chat without verify-cache gate',async()=>{
+  const enabled=await api('/models','POST',{id:'gpt-test',label:'Mock GPT',enabled:true,cost_units:1});
+  assert.ok([200,201,409].includes(enabled.status),JSON.stringify(enabled));
+  const r=await api('/accounts/'+id+'/test-chat','POST',{
+    model:'gpt-test',messages:[{role:'user',content:'hello'}]
+  });
+  assert.equal(r.status,200,JSON.stringify(r.json));
+  assert.equal(r.json.ok,true,JSON.stringify(r.json));
+  assert.match(r.json.reply,/AUTHORIZED:owner@example.edu/);
+  let state;
+  for(let i=0;i<30;i++){
+    state=(await api('/accounts/'+id+'/status')).json.data.state;
+    if(state==='authorized')break;
+    await new Promise(r=>setTimeout(r,20));
+  }
+  assert.equal(state,'authorized');
 });

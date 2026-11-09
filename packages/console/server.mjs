@@ -198,6 +198,52 @@ const adminRoutes = async(req,res,route,parts)=>{
    if(!requireRole(res,user,['admin']))return;const linked=db.one('SELECT COUNT(*) n FROM channels WHERE account_id=?',parts[2]).n;
    if(linked)return fail(res,409,'请先删除该账号关联的渠道');const target=db.one('SELECT * FROM accounts WHERE id=?',parts[2]);if(target?.runtime_type==='isolated')await unlinkAccount(DATA,target);const r=db.run('DELETE FROM accounts WHERE id=?',parts[2]);if(!r.changes)return fail(res,404,'账号不存在');audit(db,user.id,'accounts.delete',parts[2],'删除账号档案');return json(res,200,{ok:true});
  }
+ // Console-only chat test: use the selected Microsoft account's existing
+ // channel and OpenAI-compatible upstream. No external API Key is needed.
+ if(parts[1]==='accounts'&&parts.length===4&&parts[3]==='test-chat'&&method==='POST'){
+   if(!requireRole(res,user,['admin','operator']))return;
+   const account=db.one('SELECT * FROM accounts WHERE id=?',parts[2]);
+   if(!account)return fail(res,404,'微软账号不存在');
+   if(!account.enabled)return fail(res,409,'微软账号未启用');
+   const b=await input(req);
+   const model=typeof b.model==='string'?b.model.trim():'';
+   if(!model||!db.one('SELECT 1 FROM models WHERE id=? AND enabled=1',model))
+     return fail(res,400,'请选择「模型与额度」中已启用的模型');
+   const messages=b.messages;
+   if(!Array.isArray(messages)||messages.length===0||messages.length>40||
+      messages.some(m=>!m||!['user','assistant','system'].includes(m.role)||typeof m.content!=='string'||!m.content.trim()||m.content.length>12000)||
+      messages[messages.length-1].role!=='user')
+     return fail(res,400,'请填写有效的对话内容');
+   const state=accountStatus(DATA,account);
+   const available=matchingChannels(model,account.id);
+   if(!available.length)return fail(res,409,`账号当前不可调用该模型（认证状态：${state.state}${state.error?'；'+state.error:''}；或渠道未启用/不支持该模型）`);
+   const channel=chooseChannel(model,account.id);
+   if(!channel)return fail(res,429,'对应渠道正在处理其他请求');
+   const started=Date.now();
+   const controller=new AbortController();
+   const timer=setTimeout(()=>controller.abort(),channel.timeout_ms);
+   req.on('aborted',()=>controller.abort());
+   reserve(pendingChannels,channel.id,1);
+   try{
+     const upstream=await requestUpstream(channel,'/v1/chat/completions',{
+       method:'POST',body:JSON.stringify({model,messages,stream:false}),signal:controller.signal
+     },'internal-chat-test');
+     const raw=await upstream.text();
+     if(Buffer.byteLength(raw,'utf8')>1024*1024)return fail(res,502,'模型测试返回内容过大');
+     const result=safeJSON(raw,{});
+     const content=result?.choices?.[0]?.message?.content;
+     const reply=typeof content==='string'?content:Array.isArray(content)?content.map(p=>p?.text||'').join(''):'';
+     const latencyMs=Date.now()-started;
+     if(!upstream.ok)return json(res,200,{ok:false,httpStatus:upstream.status,latencyMs,
+       message:message(result?.error?.message||raw||'上游返回错误',600)});
+     if(!reply)return json(res,200,{ok:false,httpStatus:upstream.status,latencyMs,
+       message:'上游返回成功，但没有解析到标准聊天回复'});
+     return json(res,200,{ok:true,httpStatus:upstream.status,latencyMs,model,reply});
+   }catch(e){
+     return json(res,200,{ok:false,httpStatus:controller.signal.aborted?504:502,
+       latencyMs:Date.now()-started,message:controller.signal.aborted?'模型请求超过渠道设置的超时时间':'模型调用失败：'+message(e?.message,240)});
+   }finally{clearTimeout(timer);reserve(pendingChannels,channel.id,-1);}
+ }
  if(parts[1]==='accounts'&&parts.length===4&&parts[3]==='status'&&method==='GET'){
    if(!requireRole(res,user,['admin','operator']))return;
    const a=db.one('SELECT * FROM accounts WHERE id=?',parts[2]);if(!a)return fail(res,404,'账号不存在');

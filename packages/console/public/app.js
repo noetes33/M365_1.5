@@ -63,12 +63,12 @@ function textarea(name,label,value=''){return `<label class="field">${label}<tex
 function select(name,label,options,selected){return `<label class="field">${label}<select name="${name}">${options.map(o=>`<option value="${esc(o.value)}" ${o.value===selected?'selected':''}>${esc(o.label)}</option>`).join('')}</select></label>`;}
 function boxcheck(name,label,checked=true){return `<label class="checkline"><input name="${name}" type="checkbox" ${checked?'checked':''}> ${label}</label>`;}
 function formFields(f){return `<form id="dialog-form" autocomplete="off">${f}<div class="modal-actions"><button class="btn btn-secondary" type="button" id="cancel-modal">取消</button><button class="btn btn-primary" type="submit">保存更改</button></div></form>`;}
-function popup(title,content,submit=null){$('#modal-title').textContent=title;$('#modal-body').innerHTML=content;modalSubmit=submit;$('#modal').classList.remove('hidden');$('#cancel-modal')?.addEventListener('click',hideModal);$('#dialog-form')?.addEventListener('submit',async e=>{e.preventDefault();if(!modalSubmit)return;const form=e.currentTarget;const p=Object.fromEntries(new FormData(form));for(const check of form.querySelectorAll('input[type=checkbox]'))p[check.name]=check.checked;form.querySelector('button[type=submit]').disabled=true;try{const result=await modalSubmit(p);hideModal();await showTab(tab);if(result?.token){popup('密钥创建成功',`<div class="help-box warning-box">请立即复制并安全保存，关闭后无法再次查看明文密钥。</div><div class="token-display" id="new-token">${esc(result.token)}</div><div class="modal-actions"><button class="btn btn-primary" data-action="copy-token">复制密钥</button><button class="btn btn-secondary" id="cancel-modal">关闭</button></div>`);$('#cancel-modal').onclick=hideModal;}notice('已保存');}catch(err){notice('失败：'+err.message);form.querySelector('button[type=submit]').disabled=false;}});}
+function popup(title,content,submit=null){$('#modal-title').textContent=title;$('#modal-body').innerHTML=content;modalSubmit=submit;$('#modal').classList.remove('hidden');$('#cancel-modal')?.addEventListener('click',hideModal);$('#dialog-form')?.addEventListener('submit',async e=>{e.preventDefault();if(!modalSubmit)return;const form=e.currentTarget;const p=Object.fromEntries(new FormData(form));for(const check of form.querySelectorAll('input[type=checkbox]'))p[check.name]=check.checked;form.querySelector('button[type=submit]').disabled=true;try{const result=await modalSubmit(p);hideModal();await showTab(tab);if(result?.keepOpen){form.querySelector('button[type=submit]').disabled=false;return;}if(result?.token){popup('密钥创建成功',`<div class="help-box warning-box">请立即复制并安全保存，关闭后无法再次查看明文密钥。</div><div class="token-display" id="new-token">${esc(result.token)}</div><div class="modal-actions"><button class="btn btn-primary" data-action="copy-token">复制密钥</button><button class="btn btn-secondary" id="cancel-modal">关闭</button></div>`);$('#cancel-modal').onclick=hideModal;}notice('已保存');}catch(err){notice('失败：'+err.message);form.querySelector('button[type=submit]').disabled=false;}});}
 function hideModal(){for(const input of document.querySelectorAll('#modal-body input[type=password]'))input.value='';$('#modal-body').replaceChildren();$('#modal').classList.add('hidden');modalSubmit=null;}
 async function showTab(name){if(!manager()&&['accounts','channels','users','audit','settings'].includes(name))name='overview';tab=name;document.querySelectorAll('.nav-item').forEach(el=>el.classList.toggle('active',el.dataset.tab===tab));$('#crumb').textContent=({overview:'仪表盘',accounts:'微软账号',channels:'渠道管理',models:'模型与额度',users:'用户管理',keys:'API 密钥',usage:'用量记录',audit:'审计日志',settings:'系统设置'})[tab];$('.sidebar').classList.remove('show');$('#page').innerHTML='<div class="empty">数据加载中…</div>';
  try{
    if(tab==='overview'){data.overview=await api('/dashboard');renderOverview();}
-   else if(tab==='accounts'){data.accounts=(await api('/accounts')).data;data.channels=(await api('/channels')).data;renderAccounts();}
+   else if(tab==='accounts'){data.accounts=(await api('/accounts')).data;data.channels=(await api('/channels')).data;data.models=(await api('/models')).data;renderAccounts();}
    else if(tab==='channels'){[data.accounts,data.channels,data.models]=await Promise.all([api('/accounts').then(x=>x.data),api('/channels').then(x=>x.data),api('/models').then(x=>x.data)]);renderChannels();}
    else if(tab==='models'){data.models=(await api('/models')).data;renderModels();}
    else if(tab==='users'){data.users=(await api('/users')).data;renderUsers();}
@@ -86,10 +86,10 @@ function renderOverview(){const {stats,today,count,trend,recent,me,modelStats=[]
  $('#page').innerHTML=head('仪表盘',`欢迎回来，${esc(me.name)}。查看平台用量和各项资源状态。`,btn('↻ 刷新数据','refresh'))+statsHTML+`<div class="two-columns"><div class="panel-card"><div class="card-head"><h3>请求趋势</h3><span class="summary-label">最近 7 天</span></div><p class="card-subtitle">按实际请求条数统计，不代表 Token 消耗</p>${chart}</div><div class="panel-card"><div class="card-head"><h3>平台概况</h3><span class="status-pill">● 正常运行</span></div><p class="card-subtitle">多用户访问控制与额度核算</p>${capabilities}<div class="health-line"><span>有效密钥记录</span><strong>${count.keys}</strong></div><div class="health-line"><span>平均响应耗时</span><strong>${stats.avgLatency} ms</strong></div><div class="health-line"><span>我的额度</span><strong>${nquota(me.quota_units)} / 已用 ${int(me.used_units)}</strong></div></div></div>`+section('最近请求',table(['时间','模型','结果','耗时'],recentRows),'最近 6 条')+`<div class="two-columns"><div class="panel-card"><h3>模型使用分布</h3><p class="card-subtitle">按请求次数排名</p>${modelStats.length?modelStats.map(m=>`<div class="health-line"><span class="mono">${esc(m.model)}</span><strong>${int(m.requests)} 次 · ${int(m.units)} 积分</strong></div>`).join(''):'<p class="empty">暂无用量</p>'}</div><div class="panel-card"><h3>用户请求排行</h3><p class="card-subtitle">管理端可见全部用户的请求汇总</p>${userTop.length?userTop.map(u=>`<div class="health-line"><span>${esc(u.name)}</span><strong>${int(u.requests)} 次 · ${int(u.units)} 积分</strong></div>`).join(''):'<p class="empty">暂无统计</p>'}</div></div>`;
 }
 function renderAccounts(){const counts={};for(const c of data.channels)counts[c.account_id]=(counts[c.account_id]||0)+1;
- const statusText={legacy:'旧版共享核心', 'not-linked':'未授权',cached:'已缓存（未验证）',authorized:'授权成功',authorizing:'授权进行中', 'identity-mismatch':'登录邮箱不匹配','tenant-mismatch':'租户不匹配','verification-required':'外部缓存待验证',ambiguous:'缓存包含多种身份',error:'认证失败'};
+ const statusText={legacy:'旧版共享核心', 'not-linked':'未授权',cached:'已缓存（未验证）',authorized:'授权成功',authorizing:'授权进行中', 'identity-mismatch':'登录邮箱不匹配','tenant-mismatch':'租户不匹配','verification-required':'外部缓存待验证','manual-ready-to-test':'AT/RT 已保存·待对话测试',ambiguous:'缓存包含多种身份',error:'认证失败'};
  const tokenHint=a=>a.auth?.token?('AT 类型：'+a.auth.token.format.toUpperCase()+'；到期信息：'+(a.auth.token.expiresAt?new Date(a.auth.token.expiresAt*1000).toLocaleString():'未知（加密令牌）')):'';
  const rows=data.accounts.map(a=>{const state=a.auth?.state||'not-linked',valid=['cached','authorized'].includes(state),isolated=a.runtime_type==='isolated';
-   const controls=admin()?(isolated?tiny('配置自动登录','configure-auto',a.id)+(a.auth?.autoLoginConfigured?tiny('自动登录','auto-login-account',a.id)+tiny('清除凭证','remove-auto',a.id,true):'')+tiny('填写 AT / RT','import-at-rt',a.id)+(a.auth?.state==='verification-required'?tiny('重试缓存验证','verify-msal-cache',a.id):'')+tiny('本机授权（仅桌面）','authorize-account',a.id)+tiny('刷新状态','refresh-account',a.id)+tiny('解除关联','unlink-account',a.id,true):'')+tiny('编辑','edit-account',a.id)+tiny('删除','delete-account',a.id,true):'—';
+   const controls=admin()?(isolated?tiny('配置自动登录','configure-auto',a.id)+(a.auth?.autoLoginConfigured?tiny('自动登录','auto-login-account',a.id)+tiny('清除凭证','remove-auto',a.id,true):'')+tiny('填写 AT / RT','import-at-rt',a.id)+tiny('测试对话','test-chat',a.id)+(a.auth?.state==='verification-required'?tiny('重试缓存验证','verify-msal-cache',a.id):'')+tiny('本机授权（仅桌面）','authorize-account',a.id)+tiny('刷新状态','refresh-account',a.id)+tiny('解除关联','unlink-account',a.id,true):'')+tiny('编辑','edit-account',a.id)+tiny('删除','delete-account',a.id,true):'—';
    return `<tr><td>${cell(a.label,a.email_hint||'未绑定账号')}${isolated?`<span class="sub-cell">自动登录：${a.auth?.autoLoginConfigured?'已配置':'未配置'}</span>`:''}</td><td class="mono">${esc(a.tenant_hint||'—')}</td><td>${counts[a.id]||0} 个</td><td>${badge(a.enabled)}</td><td><span class="status-pill ${valid?'':'off'}" title="${esc([a.auth?.error,tokenHint(a)].filter(Boolean).join('；'))}">${esc(statusText[state]||state)}</span></td><td><div class="action-cell">${controls}</div></td></tr>`;});
  $('#page').innerHTML=head('微软账号管理','每个独立账号采用专属凭证缓存和工作进程。验证登录邮箱后才能供已授权用户使用。',admin()?btn('＋ 添加微软账号','add-account','','btn-primary'):'')+`<div class="help-box"><strong>如何使用：</strong>点击「添加微软账号」填写信息，再点「配置自动登录」在 HTTPS 管理网页中提交密码和软件 TOTP Base32 种子，最后点「自动登录」。凭证由服务端加密保存，不写入 SQLite、不会再次显示。请只添加你拥有或获得明确授权的账号。微软仍可能要求推送 MFA、FIDO2 或组织验证；遇到这种情况自动登录不能取代官方验证。</div>`+section('账号列表',table(['账号','租户别名','渠道','启用','认证状态','操作'],rows),`${data.accounts.length} 个账号`);
 }
@@ -125,16 +125,47 @@ async function action(name,id){if(name==='refresh')return showTab(tab);
  if(name==='add-account'){popup('添加微软账号档案',accountForm(),async p=>{await api('/accounts','POST',{...p});});return;}
  if(name==='edit-account'){const a=data.accounts.find(x=>x.id===id);popup('编辑微软账号档案',accountForm(a),async p=>api('/accounts/'+id,'PATCH',p));return;}
  if(name==='copy-account-id'){await navigator.clipboard.writeText(id);notice('账号 ID 已复制');return;}
+ if(name==='test-chat'){
+   const a=data.accounts.find(x=>x.id===id);if(!a)return;
+   const models=(data.models||[]).filter(m=>m.enabled).map(m=>({value:m.id,label:m.label===m.id?m.id:`${m.label} (${m.id})`}));
+   if(!models.length){notice('请先在「模型与额度」启用一个模型');return;}
+   let history=[];let selectedModel='';
+   popup('测试模型对话：'+a.label,
+     `<div class="help-box">直接使用此账号已保存的 AT 发起真实模型请求；Token 认证失败时再尝试 RT 续期。不会在后台表单显示令牌。</div>`+
+     formFields(select('model','测试模型',models,models[0].value)+textarea('prompt','输入测试问题','你好，请回复：连接测试成功。'))+
+     `<div id="chat-test-output" role="status" aria-live="polite"></div>`,
+     async p=>{
+       const output=$('#chat-test-output'),prompt=String(p.prompt||'').trim();
+       if(!prompt){output.innerHTML='<div class="help-box warning-box">请输入测试问题。</div>';return {keepOpen:true};}
+       if(selectedModel!==p.model){history=[];selectedModel=p.model;}
+       output.innerHTML='<div class="help-box">正在向模型发送测试消息…</div>';
+       try{
+         const result=await api('/accounts/'+id+'/test-chat','POST',{
+           model:p.model,messages:[...history,{role:'user',content:prompt}]
+         });
+         const meta=`HTTP ${result.httpStatus||'?'} · ${result.latencyMs??'?'} ms`;
+         if(result.ok){
+           history.push({role:'user',content:prompt},{role:'assistant',content:result.reply});
+           output.innerHTML=`<div class="help-box"><strong>测试成功</strong> · ${esc(meta)}</div>`+
+             history.map(m=>`<div class="help-box"><strong>${m.role==='user'?'提问':'模型回答'}</strong><div>${esc(m.content).replace(/\n/g,'<br>')}</div></div>`).join('');
+           $('#dialog-form textarea[name=prompt]').value='';
+         }else{
+           output.innerHTML=`<div class="help-box warning-box"><strong>调用失败</strong> · ${esc(meta)}<div>${esc(result.message||'未知错误')}</div></div>`;
+         }
+       }catch(err){output.innerHTML=`<div class="help-box warning-box"><strong>调用失败</strong><div>${esc(err.message)}</div></div>`;}
+       return {keepOpen:true};
+     });return;
+ }
  if(name==='import-at-rt'){
    const a=data.accounts.find(x=>x.id===id);if(!a)return;
    popup('直接填写 AT 和 RT：'+a.label,formFields(
-     `<div class="help-box warning-box">只填写 AT 和 RT。支持普通 JWT 和五段式加密 JWE。加密 AT 的过期时间不能从令牌中直接读取；后台会尝试通过 RT 获取目标服务 Token，并显示实际验证结果。</div>`+
+     `<div class="help-box warning-box">直接保存 AT 和 RT，点击「测试对话」后才会调用微软服务；只有明确 Token 认证失败时才尝试 RT 续期。</div>`+
      textarea('access_token','Access Token (AT)')+
      textarea('refresh_token','Refresh Token (RT)')+
      field('admin_password','再次输入管理后台登录密码','','password','required autocomplete="current-password"')
    ),async p=>{
      const result=await api('/accounts/'+id+'/import-at-rt','POST',p);
-     notice(result.message||'AT / RT 已提交，正在验证');return result;
+     notice(result.message||'AT / RT 已保存，请点击测试对话验证');return result;
    });return;
  }
  if(name==='import-msal-cache'){

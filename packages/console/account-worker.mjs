@@ -5,6 +5,7 @@ import {tmpdir} from 'node:os';
 import {resolve,join} from 'node:path';
 import {randomBytes} from 'node:crypto';
 import {pathToFileURL} from 'node:url';
+import {refreshManualToken,markManualVerified,manualIdentity} from './manual-token-store.mjs';
 
 const email=String(process.env.M365_EXPECTED_EMAIL||'').trim().toLowerCase();
 const tenant=String(process.env.M365_EXPECTED_TENANT||'').trim().toLowerCase();
@@ -22,6 +23,12 @@ async function mod(){
   return modPromise;
 }
 function identity(){
+  const manual=process.env.M365_MANUAL_TOKEN_FILE&&manualIdentity(process.env.M365_MANUAL_TOKEN_FILE);
+  if(manual){
+    if(manual.email!==email)return {ok:false,reason:'Microsoft identity does not match configured email'};
+    if(/^[a-f0-9-]{36}$/i.test(tenant)&&manual.tenant&&manual.tenant!==tenant)return {ok:false,reason:'Tenant ID mismatch'};
+    return {ok:true,email,tenant:manual.tenant||''};
+  }
   try{const data=JSON.parse(readFileSync(process.env.M365_CACHE_FILE,'utf8'));
     const accounts=Object.values(data.Account||data.account||{});
     if(accounts.length!==1)return {ok:false,reason:'Multiple or missing identities in account cache'};
@@ -50,10 +57,32 @@ const api=http.createServer(async(req,res)=>{
     if(typeof createApp!=='function')throw new Error('Missing proxy-lib createApp');
     const scope=String(req.headers['x-m365-worker-scope']||'').slice(0,128);
     if(!/^([a-f0-9-]{36}|internal-[a-z-]+)$/.test(scope)){res.writeHead(403);return res.end();}
-    const app=getApp(scope,createApp),controller=new AbortController();
+    let app=getApp(scope,createApp);const controller=new AbortController();
     req.on('aborted',()=>controller.abort());
-    const response=await app.fetch(new Request('http://worker.local'+pathname,{method:req.method,
-      headers:{'Content-Type':'application/json'},body:req.method==='POST'?await readBody(req):undefined,signal:controller.signal}));
+    const payload=req.method==='POST'?await readBody(req):undefined;
+    const doFetch=()=>app.fetch(new Request('http://worker.local'+pathname,{method:req.method,
+      headers:{'Content-Type':'application/json'},body:payload,signal:controller.signal}));
+    let response=await doFetch();
+    let refreshError=null;
+    const manual=process.env.M365_MANUAL_TOKEN_FILE&&manualIdentity(process.env.M365_MANUAL_TOKEN_FILE);
+    if(manual&&response.status===401){
+      // Only an explicit token-authentication failure triggers RT rotation.
+      try{await refreshManualToken(process.env.M365_MANUAL_TOKEN_FILE);pools.delete(scope);app=getApp(scope,createApp);response=await doFetch();}
+      catch(e){refreshError=String(e.message||'RT 续期失败').slice(0,120);}
+    }
+    if(manual&&pathname==='/v1/chat/completions'){
+      let chatOk=false;
+      if(response.ok){
+        try{
+          // Do not equate an HTTP 200 with a successful model response.
+          const copy=await response.clone().json();
+          const content=copy?.choices?.[0]?.message?.content;
+          chatOk=typeof content==='string'&&content.length>0;
+        }catch{chatOk=false;}
+      }
+      if(chatOk){markManualVerified(process.env.M365_MANUAL_TOKEN_FILE);process.send?.({type:'manual-chat-status',ok:true});}
+      else process.send?.({type:'manual-chat-status',ok:false,error:refreshError||`模型调用未返回正常回答（HTTP ${response.status}）`});
+    }
     res.writeHead(response.status,{'Content-Type':response.headers.get('content-type')||'application/json','Cache-Control':'no-store'});
     if(response.body){for await(const chunk of response.body){if(!res.write(chunk))await new Promise(resolve=>res.once('drain',resolve));}}
     res.end();
@@ -84,7 +113,7 @@ process.on('message',async m=>{
       process.send?.({type:'auth-result',ok:true,email:verified.email});
     }catch(e){
       const msg=String(e?.message||'');
-      const label=msg.includes('Credential identity')?'自动登录凭证的邮箱与当前档案不匹配':msg.includes('Microsoft identity')?'微软登录身份与当前档案邮箱不匹配':msg.includes('Tenant ID')?'微软账号租户 ID 不匹配':msg.includes('Password is missing')?'未配置微软账号密码':msg.includes('TOTP seed is missing')?'未配置 TOTP 种子':msg.includes('Account has not been authorized')?'授权失败：未生成有效 MSAL 身份缓存':msg.includes('Multiple or missing identities')?'MSAL 缓存缺少身份或包含多个账号':msg.includes('Timed out')?'微软认证超时':cacheOnly?'静默获取目标服务 Token 失败：RT 可能与客户端不匹配、权限不足或需要重新登录':automated?'自动登录失败；请检查凭证与组织 MFA 要求':'登录未完成，请在微软官方登录窗口完成授权';
+      const label=msg.includes('Credential identity')?'自动登录凭证的邮箱与当前档案不匹配':msg.includes('Microsoft identity')?'微软登录身份与当前档案邮箱不匹配':msg.includes('Tenant ID')?'微软账号租户 ID 不匹配':msg.includes('Password is missing')?'未配置微软账号密码':msg.includes('TOTP seed is missing')?'未配置 TOTP 种子':msg.includes('Account has not been authorized')?'授权失败：未生成有效 MSAL 身份缓存':msg.includes('Multiple or missing identities')?'MSAL 缓存缺少身份或包含多个账号':msg.includes('Timed out')?'微软认证超时':cacheOnly?'导入缓存的静默取 Token 失败；可能过期、权限不符或需再次 MFA':automated?'自动登录失败；请检查凭证与组织 MFA 要求':'登录未完成，请在微软官方登录窗口完成授权';
       process.send?.({type:'auth-result',ok:false,error:label});
     }
     finally{process.env.M365_NO_INTERACTIVE='1';process.env.M365_ENABLE_INTERACTIVE_APPROVAL='0';authorizing=false;}

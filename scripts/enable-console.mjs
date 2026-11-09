@@ -46,5 +46,20 @@ if(!auth.includes('M365_CONSOLE_DISABLE_LOGIN_CAPTURE')){
  writeFileSync(authFile,auth);
  console.log('Installed isolated auth config directory and disabled credential-page debug captures in console workers.');
 }
+// The direct AT/RT channel must be resolved by the existing core getToken(),
+// otherwise the built-in ChatHub client never sees the supplied AT.
+// Only the isolated-console worker sets the provider environment variables.
+if(!auth.includes('M365_MANUAL_TOKEN_PROVIDER')){
+ const pattern=/\bexport\s+(?:async\s+)?function\s+getToken\s*\([^)]*\)\s*(?::\s*[^\{\n]+)?\s*\{/;
+ const match=auth.match(pattern);
+ if(!match)throw Error('Cannot find upstream async getToken() in auth.ts; manual token integration requires review of this core version');
+ const injected=`${match[0]}
+  if (process.env.M365_MANUAL_TOKEN_PROVIDER && process.env.M365_MANUAL_TOKEN_FILE) {
+    return import(process.env.M365_MANUAL_TOKEN_PROVIDER).then(provider => provider.getManualAccessToken(process.env.M365_MANUAL_TOKEN_FILE));
+  }`;
+ auth=auth.replace(match[0],injected);
+ writeFileSync(authFile,auth);
+ console.log('Installed direct AT/RT provider for the existing ChatHub core.');
+}
 console.log('M365 console workspace enabled. Upstream auth flow retained; console privacy patch applied.');
 console.log('Next: pnpm install && pnpm build && pnpm console');
