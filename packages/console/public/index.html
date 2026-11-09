@@ -20,7 +20,15 @@
  </div>
  <div id="dashboard-app" class="app hidden">
    <aside class="sidebar">
-     <div class="side-brand"><div class="brand-logo">M<span>◆</span></div><div><strong>M365 Console</strong><small>Administration</small></div></div>
+     <div class="side-brand"><div class="brand-logo">M<span>◆</span></div><div><strong>M365 Console</strong><small>Administration - <span id="update-version">v2.0.0</span></small></div></div>
+     <div class="side-updater hidden">
+  <div class="side-updater-row">
+    <button id="check-update" type="button">检查更新</button>
+    <button id="apply-update" type="button">一键更新</button>
+  </div>
+  <small id="update-status" role="status">正在读取版本信息...</small>
+
+</div>
      <div class="workspace-switch"><span class="workspace-mark">◇</span><span>默认工作空间<small>本地网关控制台</small></span><span class="updown">⌄</span></div>
      <div class="section-title">概览</div>
      <nav id="sidebar-nav"><button class="nav-item active" data-tab="overview"><span class="nav-symbol">▦</span> 仪表盘</button><button class="nav-item" data-tab="usage"><span class="nav-symbol">◷</span> 用量记录</button>
@@ -35,7 +43,7 @@
    <div class="main-column">
       <header class="topbar"><button id="menu-toggle" class="menu-toggle" aria-label="菜单">☰</button><div class="breadcrumbs">控制台 <span>/</span> <strong id="crumb">仪表盘</strong></div><div class="top-actions"><span class="secure-chip"><span class="green-dot"></span> 本地运行</span><button id="top-refresh" class="icon-button" title="刷新">↻</button><span class="user-avatar" id="user-avatar">A</span><span id="user-name" class="user-name">管理员</span></div></header>
       <main id="page" class="main-content"></main>
-      <footer class="main-footer">M365 Console v1.3 · OpenAI-compatible gateway · 仅限授权环境使用</footer>
+      <footer class="main-footer">M365 Console <span id="footer-version">v2.0.0</span> · OpenAI-compatible gateway · 仅限授权环境使用</footer>
    </div>
  </div>
  <div id="modal" class="modal-shade hidden" role="dialog" aria-modal="true"><div class="dialog"><div class="dialog-head"><h2 id="modal-title">操作</h2><button class="icon-button" id="close-modal" aria-label="关闭">×</button></div><div id="modal-body"></div></div></div>

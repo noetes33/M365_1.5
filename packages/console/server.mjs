@@ -8,6 +8,7 @@ import { openStore,uuid,hash,scrypt,safeJSON,now,audit,publicUser,publicKey,publ
 import { requestUpstream, isEmbedded, embeddedState, configureAccounts } from './embedded.mjs';
 import { accountStatus, accountReady, beginAuthorizedLogin, beginAutomatedLogin, hasAutoSecrets, importExternalMsalCache, importExternalAtRt, retryImportedCacheVerification, unlinkAccount, shutdownWorkers } from './account-manager.mjs';
 import {saveCredentials,eraseCredentials} from './credential-vault.mjs';
+import {updateOverview,queueUpdate} from './update-control.mjs';
 
 const ROOT=path.dirname(fileURLToPath(import.meta.url));
 const HOST=process.env.M365_ADMIN_HOST||'127.0.0.1';
@@ -80,6 +81,19 @@ const adminRoutes = async(req,res,route,parts)=>{
  const s=requireSession(req,res,unsafe);if(!s)return;
  const user=db.one('SELECT * FROM users WHERE id=?',s.user.id);
  if(route==='/auth/me'&&method==='GET')return json(res,200,{csrf:s.csrf,user:publicUser(user)});
+ if(route==='/system/update'&&method==='GET'){
+   if(!requireRole(res,user,['admin']))return;
+   return json(res,200,updateOverview(DATA));
+ }
+ if(route==='/system/update/check'&&method==='POST'){
+   if(!requireRole(res,user,['admin']))return;
+   return json(res,202,queueUpdate(DATA,'check'));
+ }
+ if(route==='/system/update/apply'&&method==='POST'){
+   if(!requireRole(res,user,['admin']))return;
+   return json(res,202,queueUpdate(DATA,'update'));
+ }
+
  if(route==='/auth/logout'&&method==='POST'){
    db.run('DELETE FROM sessions WHERE token_hash=?',hash(cookie(req,'m365_console_session')));
    res.setHeader('Set-Cookie','m365_console_session=; HttpOnly; SameSite=Strict; Path=/admin; Max-Age=0');return json(res,200,{ok:true});

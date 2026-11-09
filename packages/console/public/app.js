@@ -8,7 +8,48 @@ const admin=()=>who?.role==='admin',manager=()=>['admin','operator'].includes(wh
 function notice(text){const el=$('#toast');el.textContent=text;el.classList.remove('hidden');clearTimeout(toastTimeout);toastTimeout=setTimeout(()=>el.classList.add('hidden'),3600);}
 async function api(endpoint,method='GET',payload){const res=await fetch('/admin/api'+endpoint,{method,credentials:'same-origin',headers:{...(payload!==undefined?{'Content-Type':'application/json'}:{}),...(['GET','HEAD'].includes(method)?{}:{'X-CSRF-Token':csrf})},body:payload===undefined?undefined:JSON.stringify(payload)});const out=await res.json().catch(()=>({}));if(!res.ok){if(res.status===401&&endpoint!=='/auth/login')logoutView();throw Error(out.error?.message||`HTTP ${res.status}`);}return out;}
 function logoutView(){$('#dashboard-app').classList.add('hidden');$('#auth-screen').classList.remove('hidden');csrf='';who=null;}
-function welcome(){ $('#auth-screen').classList.add('hidden');$('#dashboard-app').classList.remove('hidden');$('#user-name').textContent=who.name;$('#user-avatar').textContent=(who.name||'A')[0];document.querySelectorAll('.manage-only').forEach(el=>el.classList.toggle('hidden',!manager())); }
+function welcome(){ $('#auth-screen').classList.add('hidden');$('#dashboard-app').classList.remove('hidden');$('#user-name').textContent=who.name;$('#user-avatar').textContent=(who.name||'A')[0];document.querySelectorAll('.manage-only').forEach(el=>el.classList.toggle('hidden',!manager())); document.querySelector('.side-updater')?.classList.toggle('hidden',!admin());void refreshUpdateInfo(); }
+let updatePolling=null;
+let initiallyLoadedCommit=null;
+const busyPhases=new Set(['checking','backing-up','pulling','building','restarting','verifying']);
+async function refreshUpdateInfo(){
+ if(!admin())return;
+ try{
+   const st=await api('/system/update');
+   if(st.commit&&initiallyLoadedCommit&&st.commit!==initiallyLoadedCommit&&st.phase==='done'){location.reload();return;}
+   if(st.commit&&!initiallyLoadedCommit)initiallyLoadedCommit=st.commit;
+   const version=$('#update-version');
+   if(version)version.textContent='v'+st.version+(st.commit?' · '+st.commit.slice(0,7):'');
+   const footer=$('#footer-version');if(footer)footer.textContent='v'+st.version;
+   const label=$('#update-status');
+   let summary=st.message||'尚未检查更新';
+   if(!st.enabled)summary='请先安装一次主机更新服务';
+   else if(st.pending)summary='更新任务已排队';
+   else if(st.phase==='done'&&st.updateAvailable)summary='检测到新提交：'+(st.remoteCommit||'');
+   else if(st.phase==='done'&&!st.updateAvailable)summary='已是最新版本';
+   if(label){label.textContent=summary;label.title=summary;}
+   const check=$('#check-update'),apply=$('#apply-update');
+   const busy=st.pending||busyPhases.has(st.phase);
+   if(check)check.disabled=!st.enabled||busy;
+   if(apply)apply.disabled=!st.enabled||busy;
+   if(!busy&&updatePolling){clearInterval(updatePolling);updatePolling=null;}
+   if(busy&&!updatePolling)updatePolling=setInterval(refreshUpdateInfo,2500);
+ }catch(e){
+   const label=$('#update-status');if(label)label.textContent='更新期间连接暂不可用，正在重新连接…';
+   if(!updatePolling)updatePolling=setInterval(refreshUpdateInfo,2500);
+ }
+}
+async function triggerUpdate(action){
+ if(!admin())return;
+ if(action==='apply'&&!confirm('确定更新 M365 Console 吗？将自动备份、拉取 GitHub main、构建并重启 M365 服务；网页可能短暂断开。'))return;
+ try{
+   await api('/system/update/'+action,'POST',{});
+   const label=$('#update-status');if(label)label.textContent=action==='check'?'正在检查 GitHub 更新…':'更新任务已提交，正在处理…';
+   if(!updatePolling)updatePolling=setInterval(refreshUpdateInfo,2500);
+   await refreshUpdateInfo();
+ }catch(e){notice('更新操作失败：'+e.message);}
+}
+
 function head(title,description,actions=''){return `<div class="page-head"><div><div class="eyebrow">M365 COPILOT / MANAGEMENT</div><h1>${title}</h1><p>${description}</p></div><div class="head-actions">${actions}</div></div>`;}
 function btn(name,action,id='',cls='btn-secondary'){return `<button type="button" class="btn ${cls}" data-action="${action}" data-id="${esc(id)}">${name}</button>`;}
 function tiny(name,action,id='',danger=false){return `<button type="button" class="tiny-btn ${danger?'danger':''}" data-action="${action}" data-id="${esc(id)}">${name}</button>`;}
@@ -145,5 +186,7 @@ $('#modal').addEventListener('click',async e=>{const el=e.target.closest('[data-
 $('#close-modal').onclick=hideModal;
 $('#modal').addEventListener('click',e=>{if(e.target.id==='modal')hideModal();});
 $('#top-refresh').onclick=()=>showTab(tab);
+$('#check-update').onclick=()=>triggerUpdate('check');
+$('#apply-update').onclick=()=>triggerUpdate('apply');
 $('#menu-toggle').onclick=()=>$('.sidebar').classList.toggle('show');
 init();
