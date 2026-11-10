@@ -9,6 +9,7 @@ import {accountDir,autoSecretPath} from './account-paths.mjs';
 import {vaultPresent,readCredentials} from './credential-vault.mjs';
 import {cacheImportPending,clearCacheImportPending,saveImportedCache,validateCacheImport} from './msal-cache-import.mjs';
 import {hasManualTokens,manualTokenPath,saveManualTokens,statusManualTokens} from './manual-token-store.mjs';
+import {updateManualChatStatus} from './chat-test-isolation.mjs';
 import {fileURLToPath} from 'node:url';
 
 const ROOT=resolve(fileURLToPath(new URL('.', import.meta.url)));
@@ -91,8 +92,10 @@ export async function startWorker(dataRoot,a){
   child.stderr.on('data',()=>{});
   child.on('message',m=>{
     if(m?.type!=='manual-chat-status')return;
-    entry.verified=!!m.ok;
-    entry.authError=m.ok?null:String(m.error||'微软服务未接受当前 AT').slice(0,160);
+    // A failed model request (502, empty completion, unsupported tone, timeout)
+    // is NOT evidence that this Microsoft account's credentials are invalid.
+    // Keep previously successful authorization and make other models retryable.
+    updateManualChatStatus(entry,m);
   });
   child.on('exit',()=>{entry.port=null;entry.loginPending=false;entry.verified=false;});
   entry.readyPromise=new Promise((resolve,reject)=>{

@@ -4,6 +4,7 @@ import {readFileSync,writeFileSync,rmSync,existsSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {resolve,join} from 'node:path';
 import {randomBytes} from 'node:crypto';
+import {poolKeyForRequest} from './chat-test-isolation.mjs';
 import {pathToFileURL} from 'node:url';
 import {refreshManualToken,markManualVerified,manualIdentity} from './manual-token-store.mjs';
 
@@ -57,9 +58,13 @@ const api=http.createServer(async(req,res)=>{
     if(typeof createApp!=='function')throw new Error('Missing proxy-lib createApp');
     const scope=String(req.headers['x-m365-worker-scope']||'').slice(0,128);
     if(!/^([a-f0-9-]{36}|internal-[a-z-]+)$/.test(scope)){res.writeHead(403);return res.end();}
-    let app=getApp(scope,createApp);const controller=new AbortController();
+    const controller=new AbortController();
     req.on('aborted',()=>controller.abort());
     const payload=req.method==='POST'?await readBody(req):undefined;
+    // Scope the upstream session pool by the requested model, not just by the
+    // calling API user/test slot. This avoids sharing a failed 6.1 session with 5.x.
+    const poolScope=poolKeyForRequest(scope,pathname,payload);
+    let app=getApp(poolScope,createApp);
     const doFetch=()=>app.fetch(new Request('http://worker.local'+pathname,{method:req.method,
       headers:{'Content-Type':'application/json'},body:payload,signal:controller.signal}));
     let response=await doFetch();
@@ -67,7 +72,7 @@ const api=http.createServer(async(req,res)=>{
     const manual=process.env.M365_MANUAL_TOKEN_FILE&&manualIdentity(process.env.M365_MANUAL_TOKEN_FILE);
     if(manual&&response.status===401){
       // Only an explicit token-authentication failure triggers RT rotation.
-      try{await refreshManualToken(process.env.M365_MANUAL_TOKEN_FILE);pools.delete(scope);app=getApp(scope,createApp);response=await doFetch();}
+      try{await refreshManualToken(process.env.M365_MANUAL_TOKEN_FILE);pools.delete(poolScope);app=getApp(poolScope,createApp);response=await doFetch();}
       catch(e){refreshError=String(e.message||'RT 续期失败').slice(0,120);}
     }
     if(manual&&pathname==='/v1/chat/completions'){
