@@ -89,7 +89,7 @@ function renderAccounts(){const counts={};for(const c of data.channels)counts[c.
  const statusText={legacy:'旧版共享核心', 'not-linked':'未授权',cached:'已缓存（未验证）',authorized:'授权成功',authorizing:'授权进行中', 'identity-mismatch':'登录邮箱不匹配','tenant-mismatch':'租户不匹配','verification-required':'外部缓存待验证','manual-ready-to-test':'AT/RT 已保存·待对话测试',ambiguous:'缓存包含多种身份',error:'认证失败'};
  const tokenHint=a=>a.auth?.token?('AT 类型：'+a.auth.token.format.toUpperCase()+'；到期信息：'+(a.auth.token.expiresAt?new Date(a.auth.token.expiresAt*1000).toLocaleString():'未知（加密令牌）')):'';
  const rows=data.accounts.map(a=>{const state=a.auth?.state||'not-linked',valid=['cached','authorized'].includes(state),isolated=a.runtime_type==='isolated';
-   const controls=admin()?(isolated?tiny('配置自动登录','configure-auto',a.id)+(a.auth?.autoLoginConfigured?tiny('自动登录','auto-login-account',a.id)+tiny('清除凭证','remove-auto',a.id,true):'')+tiny('填写 AT / RT','import-at-rt',a.id)+tiny('测试对话','test-chat',a.id)+(a.auth?.state==='verification-required'?tiny('重试缓存验证','verify-msal-cache',a.id):'')+tiny('本机授权（仅桌面）','authorize-account',a.id)+tiny('刷新状态','refresh-account',a.id)+tiny('解除关联','unlink-account',a.id,true):'')+tiny('编辑','edit-account',a.id)+tiny('删除','delete-account',a.id,true):'—';
+   const controls=admin()?(isolated?tiny('配置自动登录','configure-auto',a.id)+(a.auth?.autoLoginConfigured?tiny('自动登录','auto-login-account',a.id)+tiny('清除凭证','remove-auto',a.id,true):'')+tiny('填写 AT / RT','import-at-rt',a.id)+tiny('立即用 RT 刷新 AT','refresh-at',a.id)+tiny('测试对话','test-chat',a.id)+(a.auth?.state==='verification-required'?tiny('重试缓存验证','verify-msal-cache',a.id):'')+tiny('本机授权（仅桌面）','authorize-account',a.id)+tiny('刷新状态','refresh-account',a.id)+tiny('解除关联','unlink-account',a.id,true):'')+tiny('编辑','edit-account',a.id)+tiny('删除','delete-account',a.id,true):'—';
    return `<tr><td>${cell(a.label,a.email_hint||'未绑定账号')}${isolated?`<span class="sub-cell">自动登录：${a.auth?.autoLoginConfigured?'已配置':'未配置'}</span>`:''}</td><td class="mono">${esc(a.tenant_hint||'—')}</td><td>${counts[a.id]||0} 个</td><td>${badge(a.enabled)}</td><td><span class="status-pill ${valid?'':'off'}" title="${esc([a.auth?.error,tokenHint(a)].filter(Boolean).join('；'))}">${esc(statusText[state]||state)}</span></td><td><div class="action-cell">${controls}</div></td></tr>`;});
  $('#page').innerHTML=head('微软账号管理','每个独立账号采用专属凭证缓存和工作进程。验证登录邮箱后才能供已授权用户使用。',admin()?btn('＋ 添加微软账号','add-account','','btn-primary'):'')+`<div class="help-box"><strong>如何使用：</strong>点击「添加微软账号」填写信息，再点「配置自动登录」在 HTTPS 管理网页中提交密码和软件 TOTP Base32 种子，最后点「自动登录」。凭证由服务端加密保存，不写入 SQLite、不会再次显示。请只添加你拥有或获得明确授权的账号。微软仍可能要求推送 MFA、FIDO2 或组织验证；遇到这种情况自动登录不能取代官方验证。</div>`+section('账号列表',table(['账号','租户别名','渠道','启用','认证状态','操作'],rows),`${data.accounts.length} 个账号`);
 }
@@ -102,7 +102,7 @@ function renderModels(){const rows=data.models.map(m=>`<tr><td>${cell(m.label,m.
 function renderUsers(){const rows=data.users.map(u=>`<tr><td>${cell(u.name,u.email)}</td><td>${esc({admin:'管理员',operator:'运营人员',user:'普通用户'}[u.role])}</td><td>${badge(u.enabled)}</td><td><div class="metric-usage">${int(u.used_units)} / ${nquota(u.quota_units)}</div>${u.quota_units!==null?`<div class="progress-track"><div class="progress-fill" style="width:${Math.min(100,u.used_units/Math.max(1,u.quota_units)*100)}%"></div></div>`:''}</td><td>${nquota(u.daily_limit)}</td><td>${u.concurrency_limit}</td><td><div class="action-cell">${admin()?tiny('编辑','edit-user',u.id)+tiny('清零','reset-user',u.id)+tiny('改密','reset-user-password',u.id)+tiny('授权账号','grant-user-accounts',u.id):'—'}</div></td></tr>`);
  $('#page').innerHTML=head('用户管理','独立账号、角色与额度。普通用户只能管理自己的 API Key 和查看自己的用量。',admin()?btn('＋ 创建用户','add-user','','btn-primary'):'')+section('用户列表',table(['用户','角色','状态','积分用量','每日限次','并发','操作'],rows),`${data.users.length} 位用户`);
 }
-function renderKeys(){const owner=Object.fromEntries(data.users.map(x=>[x.id,x.name]));const acc=Object.fromEntries((data.availableAccounts||[]).map(a=>[a.id,a.label]));const rows=data.keys.map(k=>`<tr><td>${cell(k.name,k.prefix+'…')}</td><td>${esc(owner[k.owner_id]||'—')}</td><td>${badge(k.enabled)}</td><td><div class="metric-usage">${int(k.used_units)} / ${nquota(k.quota_units)}</div></td><td>${esc(k.account_id?(acc[k.account_id]||'无权限访问'):'旧版核心')}</td><td>${k.models?`${k.models.length} 个指定模型`:'全部模型'}</td><td>${when(k.last_used)}</td><td><div class="action-cell">${tiny('编辑','edit-key',k.id)}${admin()?tiny('清零','reset-key',k.id):''}${tiny('撤销','delete-key',k.id,true)}</div></td></tr>`);
+function renderKeys(){const owner=Object.fromEntries(data.users.map(x=>[x.id,x.name]));const acc=Object.fromEntries((data.availableAccounts||[]).map(a=>[a.id,a.label]));const rows=data.keys.map(k=>`<tr><td>${cell(k.name,k.prefix+'…')}</td><td>${esc(owner[k.owner_id]||'—')}</td><td>${badge(k.enabled)}</td><td><div class="metric-usage">${int(k.used_units)} / ${nquota(k.quota_units)}</div></td><td>${esc(k.account_id?(acc[k.account_id]||'无权限访问'):'旧版核心')}</td><td>${k.models?`${k.models.length} 个指定模型`:'全部模型'}</td><td>${when(k.last_used)}</td><td><div class="action-cell">${tiny('使用 API','api-config',k.id)+tiny('编辑','edit-key',k.id)}${admin()?tiny('清零','reset-key',k.id):''}${tiny('撤销','delete-key',k.id,true)}</div></td></tr>`);
  $('#page').innerHTML=head('API 密钥','管理客户端访问密钥、模型权限和独立额度，明文密钥仅在创建时显示一次。',btn('＋ 生成 API Key','add-key','','btn-primary'))+`<div class="help-box">客户端 Base URL：<code>http://127.0.0.1:4142/v1</code>。每个 Key 绑定一位用户，用量会同时记录在用户与 Key 下。</div>`+section('密钥列表',table(['名称 / 前缀','所属用户','状态','已用 / 额度','微软账号','模型范围','最近使用','操作'],rows),`${data.keys.length} 个密钥`);
 }
 function renderUsage(){const rows=data.usage.map(r=>`<tr><td>${when(r.created_at)}</td><td class="mono">${esc(r.model)}</td><td>${badge(r.status>=200&&r.status<300,r.status,'HTTP '+r.status)}</td><td>${r.units}</td><td>${r.input_tokens??'—'} / ${r.output_tokens??'—'}</td><td>${r.latency_ms} ms</td><td class="mono">${esc(short(r.channel_id))}</td></tr>`);
@@ -121,6 +121,46 @@ function modelForm(m){return formFields(field('id','模型标识',m?.id||'','tex
 const emptyNull=v=>v===''||v===undefined?null:Number(v);
 const csvCells=v=>`"${String(v??'').replaceAll('"','""')}"`;
 function csvExport(){const rows=[['时间','用户ID','Key ID','渠道 ID','模型','HTTP 状态','积分','输入 Token','输出 Token','Token 来源','耗时毫秒','Request ID'],...data.usage.map(x=>[x.created_at,x.user_id,x.key_id,x.channel_id,x.model,x.status,x.units,x.input_tokens,x.output_tokens,x.usage_source,x.latency_ms,x.request_id])];const blob=new Blob(['\uFEFF'+rows.map(r=>r.map(csvCells).join(',')).join('\n')],{type:'text/csv;charset=utf-8'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='m365-usage-'+new Date().toISOString().slice(0,10)+'.csv';a.click();URL.revokeObjectURL(url);}
+function openClientConfig(key){
+  const models=(data.models||[]).filter(m=>m.enabled);
+  const allowed=key.models?models.filter(m=>key.models.includes(m.id)):models;
+  const opts=allowed.map(m=>`<option value="${esc(m.id)}">${esc(m.id)}</option>`).join('');
+  const html=`<div class="help-box">Codex CLI 使用 Responses API；OpenCode 使用现有 Chat Completions API。以下配置在浏览器内生成，不会向管理后台上传输入的 API Key。</div>
+  <label class="field">模型<select id="api-client-model">${opts||'<option value="m365-copilot">m365-copilot</option>'}</select></label>
+  <label class="field">API Key（可选；只在本次窗口内填入配置文件）<input id="api-client-key" autocomplete="off" type="password" placeholder="m365_...（留空生成占位符）"></label>
+  <div class="modal-actions" style="justify-content:flex-start; flex-wrap:wrap">
+    <button type="button" class="btn btn-secondary" data-config-mode="codex">Codex CLI</button>
+    <button type="button" class="btn btn-secondary" data-config-mode="codex-ws">Codex CLI（WebSocket）</button>
+    <button type="button" class="btn btn-secondary" data-config-mode="opencode">OpenCode</button>
+  </div>
+  <label class="field">配置内容<textarea id="api-client-snippet" rows="14" readonly spellcheck="false"></textarea></label>
+  <div class="modal-actions"><button type="button" class="btn btn-primary" id="api-client-copy">复制配置</button><button type="button" class="btn btn-secondary" id="api-client-close">关闭</button></div>`;
+  popup('使用 API：'+key.name,html);
+  let mode='codex';
+  const render=()=>{
+    const model=$('#api-client-model').value;
+    const secret=$('#api-client-key').value||'<YOUR_M365_API_KEY>';
+    const base=location.origin+'/v1';
+    const header=JSON.stringify('Bearer '+secret);
+    const toml=`model = ${JSON.stringify(model)}\nmodel_provider = "m365"\n\n[model_providers.m365]\nname = "M365 Console"\nbase_url = ${JSON.stringify(base)}\nwire_api = "responses"\n${mode==='codex-ws'?'supports_websockets = true\n':'supports_websockets = false\n'}http_headers = { Authorization = ${header} }\n`;
+    const openCode={"$schema":"https://opencode.ai/config.json",providers:{m365:{name:'M365 Console',package:'@opencode/ai/providers/openai-compatible',settings:{baseURL:base,apiKey:secret},models:{[model]:{name:model}}}}};
+    $('#api-client-snippet').value=mode==='opencode'?JSON.stringify(openCode,null,2):toml;
+    for(const b of document.querySelectorAll('[data-config-mode]'))b.classList.toggle('btn-primary',b.dataset.configMode===mode);
+  };
+  for(const b of document.querySelectorAll('[data-config-mode]'))b.addEventListener('click',()=>{mode=b.dataset.configMode;render();});
+  $('#api-client-model').addEventListener('change',render);
+  $('#api-client-key').addEventListener('input',render);
+  $('#api-client-close').addEventListener('click',hideModal);
+  $('#api-client-copy').addEventListener('click',async()=>{
+    const el=$('#api-client-snippet');
+    try{if(navigator.clipboard?.writeText)await navigator.clipboard.writeText(el.value);
+      else{el.focus();el.select();if(!document.execCommand('copy'))throw Error('copy failed');}
+      notice('配置已复制');
+    }catch{el.focus();el.select();notice('复制失败，请手动按 Ctrl+C');}
+  });
+  render();
+}
+
 async function action(name,id){if(name==='refresh')return showTab(tab);
  if(name==='add-account'){popup('添加微软账号档案',accountForm(),async p=>{await api('/accounts','POST',{...p});});return;}
  if(name==='edit-account'){const a=data.accounts.find(x=>x.id===id);popup('编辑微软账号档案',accountForm(a),async p=>api('/accounts/'+id,'PATCH',p));return;}
@@ -156,6 +196,20 @@ async function action(name,id){if(name==='refresh')return showTab(tab);
        return {keepOpen:true};
      });return;
  }
+ if(name==='refresh-at'){
+   const a=data.accounts.find(x=>x.id===id);if(!a)return;
+   try{
+     const r=await api('/accounts/'+id+'/refresh-at','POST',{});
+     await showTab('accounts');
+     const expiry=r.accessExpiresAt?new Date(r.accessExpiresAt*1000).toLocaleString():'未知';
+     popup('RT 主动续期成功：'+a.label,
+       '<div class="help-box">RT 续期成功，新的 AT 已保存。若微软返回新 RT，也已同步保存。<div>AT 到期时间：'+esc(expiry)+'</div><p>如需验证新 AT 能否真正对话，请点击账号的「测试对话」。</p></div>');
+   }catch(e){
+     popup('RT 主动续期失败：'+a.label,'<div class="help-box warning-box">'+esc(e.message)+'</div>');
+   }
+   return;
+ }
+ if(name==='api-config'){const k=data.keys?.find(x=>x.id===id);if(k)openClientConfig(k);return;}
  if(name==='import-at-rt'){
    const a=data.accounts.find(x=>x.id===id);if(!a)return;
    popup('直接填写 AT 和 RT：'+a.label,formFields(

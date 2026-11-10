@@ -8,7 +8,7 @@ import {join, resolve} from 'node:path';
 import {accountDir,autoSecretPath} from './account-paths.mjs';
 import {vaultPresent,readCredentials} from './credential-vault.mjs';
 import {cacheImportPending,clearCacheImportPending,saveImportedCache,validateCacheImport} from './msal-cache-import.mjs';
-import {hasManualTokens,manualTokenPath,saveManualTokens,statusManualTokens} from './manual-token-store.mjs';
+import {hasManualTokens,manualTokenPath,saveManualTokens,statusManualTokens,refreshManualToken} from './manual-token-store.mjs';
 import {updateManualChatStatus} from './chat-test-isolation.mjs';
 import {fileURLToPath} from 'node:url';
 
@@ -182,6 +182,20 @@ export async function importExternalAtRt(dataRoot,a,at,rt){
   entry.loginPending=false;
   return {state:'manual-ready-to-test',message:'AT/RT 已保存。点击「测试对话」用当前 AT 实际验证；仅在 Token 认证失败时尝试 RT 续期。',
     tokenFormat:saved.tokenFormat,accessExpiresAt:saved.expiresAt};
+}
+
+/** An explicit RT test/rotation, separate from expiry-triggered refresh. */
+export async function refreshExternalAtRt(dataRoot,a){
+  if(a.runtime_type!=='isolated'||!a.enabled||!hasManualTokens(dataRoot,a.id))
+    throw Object.assign(new Error('该账号没有已保存的 AT/RT'),{status:409});
+  await refreshManualToken(manualTokenPath(dataRoot,a.id));
+  // A previously cached ChatHub app may be holding the old AT in memory.
+  await stopWorkerForCacheReload(a.id,true);
+  await startWorker(dataRoot,a);
+  const token=statusManualTokens(dataRoot,a.id);
+  return {ok:true,refreshed:true,tokenFormat:token?.format||'unknown',
+    accessExpiresAt:token?.expiresAt||null,
+    message:'RT 续期成功。新 AT 已保存，微软若返回轮换 RT 也已同步保存。请用测试对话验证新 AT。'};
 }
 
 export async function retryImportedCacheVerification(dataRoot,a){

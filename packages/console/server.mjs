@@ -6,8 +6,10 @@ import { fileURLToPath } from 'node:url';
 import { readFileSync } from 'node:fs';
 import { openStore,uuid,hash,scrypt,safeJSON,now,audit,publicUser,publicKey,publicAccount,publicChannel } from './store.mjs';
 import { requestUpstream, isEmbedded, embeddedState, configureAccounts } from './embedded.mjs';
-import { accountStatus, accountReady, beginAuthorizedLogin, beginAutomatedLogin, hasAutoSecrets, importExternalMsalCache, importExternalAtRt, retryImportedCacheVerification, unlinkAccount, shutdownWorkers } from './account-manager.mjs';
+import { accountStatus, accountReady, beginAuthorizedLogin, beginAutomatedLogin, hasAutoSecrets, importExternalMsalCache, importExternalAtRt, refreshExternalAtRt, retryImportedCacheVerification, unlinkAccount, shutdownWorkers } from './account-manager.mjs';
 import {saveCredentials,eraseCredentials} from './credential-vault.mjs';
+import {runResponses,responsesEvents} from './responses-compat.mjs';
+import {acceptResponsesWebSocket} from './responses-socket.mjs';
 import {updateOverview,queueUpdate} from './update-control.mjs';
 
 const ROOT=path.dirname(fileURLToPath(import.meta.url));
@@ -255,6 +257,19 @@ const adminRoutes = async(req,res,route,parts)=>{
    if(a.runtime_type!=='isolated')return fail(res,400,'该账号是旧版档案，请创建独立授权账号');
    try{const result=await beginAuthorizedLogin(DATA,a);audit(db,user.id,'accounts.authorize',a.id,'管理员启动本机交互式登录');return json(res,202,result);}catch(e){return fail(res,409,e.message);}
  }
+ // Manually use the saved RT to request a new AT at any time.
+ if(parts[1]==='accounts'&&parts.length===4&&parts[3]==='refresh-at'&&method==='POST'){
+   if(!requireRole(res,user,['admin']))return;
+   const a=db.one('SELECT * FROM accounts WHERE id=?',parts[2]);
+   if(!a||a.runtime_type!=='isolated')return fail(res,404,'独立微软账号不存在');
+   try{
+     const info=await refreshExternalAtRt(DATA,a);
+     audit(db,user.id,'accounts.rt_refresh',a.id,'管理员主动用 RT 续期 AT；不记录令牌内容');
+     return json(res,200,info);
+   }catch(e){
+     return fail(res,e.status||502,`RT 主动续期失败：${message(e.message,230)}`);
+   }
+ }
  // Direct AT / RT form: accept the active admin console transport (HTTP or HTTPS).
  if(parts[1]==='accounts'&&parts.length===4&&parts[3]==='import-at-rt'&&method==='POST'){
    if(!requireRole(res,user,['admin']))return;
@@ -407,9 +422,38 @@ const adminRoutes = async(req,res,route,parts)=>{
  return fail(res,404,'管理接口不存在');
 };
 
+async function postInternalChat(authHeader,chat){
+  // Reuse the existing gateway for account routing, quotas, token renewal,
+  // upstream errors and usage logging. Do not create a second auth stack.
+  return fetch(`http://127.0.0.1:${PORT}/v1/chat/completions`,{
+    method:'POST',headers:{'Authorization':authHeader,'Content-Type':'application/json'},
+    body:JSON.stringify(chat),signal:AbortSignal.timeout(120000)
+  });
+}
 async function gateway(req,res,route){
  const auth=authKey(req);if(!auth)return fail(res,401,'无效、禁用或过期的 API Key');
  const {k,u}=auth;
+ if(route==='/v1/responses'&&req.method==='POST'){
+   let data;
+   try{data=await input(req,8*1024*1024);}catch(e){return fail(res,e.status||400,e.message);}
+   if(data.stream===true){
+     res.writeHead(200,{'Content-Type':'text/event-stream; charset=utf-8','Cache-Control':'no-store','Connection':'keep-alive','X-Accel-Buffering':'no'});
+     // Upstream is non-streaming for manual-AT verification; keep the Codex SSE
+     // connection alive while Microsoft finishes a reasoning response.
+     const heartbeat=setInterval(()=>{if(!res.destroyed)res.write(': keep-alive\n\n');},12000);
+     try{
+       const result=await runResponses(data,k.id,chat=>postInternalChat(req.headers.authorization,chat));
+       for(const event of responsesEvents(result))res.write('event: '+event.type+'\ndata: '+JSON.stringify(event)+'\n\n');
+     }catch(e){
+       res.write('event: error\ndata: '+JSON.stringify({type:'error',error:{type:'gateway_error',message:message(e.message,300)}})+'\n\n');
+     }finally{clearInterval(heartbeat);res.end();}
+     return;
+   }
+   try{
+     const result=await runResponses(data,k.id,chat=>postInternalChat(req.headers.authorization,chat));
+     return json(res,200,result);
+   }catch(e){return fail(res,e.status||502,message(e.message,300));}
+ }
  if(route==='/v1/models'&&req.method==='GET'){
    const visible=visibleModels(u,k).filter(m=>matchingChannels(m.id,k.account_id).length);
    // Preserve upstream model metadata such as context_window and input hints,
@@ -477,6 +521,15 @@ export const server=http.createServer(async(req,res)=>{
    if(route.startsWith('/v1/'))return await gateway(req,res,route);
    return fail(res,404,'页面不存在');
  }catch(e){if(!res.headersSent)fail(res,e.status||500,e.status?e.message:'内部服务器错误');else res.destroy();if(!e.status)console.error('Unhandled:',e.stack);}
+});
+server.on('upgrade',(req,socket,head)=>{
+  let route='';try{route=new URL(req.url||'/','http://local').pathname;}catch{}
+  if(route!=='/v1/responses')return socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n');
+  const auth=authKey(req);
+  if(!auth)return socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+  acceptResponsesWebSocket(req,socket,head,{
+    owner:auth.k.id,postChat:chat=>postInternalChat(req.headers.authorization,chat)
+  });
 });
 process.on('SIGTERM',()=>{shutdownWorkers();server.close();});
 process.on('SIGINT',()=>{shutdownWorkers();server.close();});
