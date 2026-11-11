@@ -47,25 +47,56 @@ test('warmup stores continuation without generating a model reply',()=>{
 test('upstream HTTP errors are preserved',async()=>{
  await assert.rejects(()=>runResponses({model:'m365-copilot',input:'test'},'err',async()=>new Response(JSON.stringify({error:{message:'Model not available'}}),{status:502})),e=>e.status===502&&e.message==='Model not available');
 });
-test('image inputs report unsupported instead of silently dropping images',()=>{
- assert.throws(()=>responsesToChat({model:'m365-copilot',input:[{role:'user',content:[{type:'input_image',image_url:'https://example.org/a.png'}]}]},'image'),/text input only/);
+test('images are forwarded to the M365 image path instead of dropped',async()=>{
+ const assert=(await import('node:assert/strict')).default;
+ const {responsesToChat}=await import('../responses-compat.mjs');
+ const tiny='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAEklEQVQI12P4z8AARMAgAAGfAQEGhMUYAAAAAElFTkSuQmCC';
+ const input={model:'gpt-5.6-think-deeper',input:[{role:'user',content:[{type:'input_text',text:'what is it?'},{type:'input_image',image_url:tiny}]}]};
+ const result=responsesToChat(input,'legacy-image-regression');
+ assert.equal(result.chat.messages[0].role,'user');
+ assert.equal(result.chat.messages[0].content[0].text,'what is it?');
+ assert.equal(result.chat.messages[0].content[1].type,'image_url');
+ assert.equal(result.chat.messages[0].content[1].image_url.url,tiny);
 });
-test('WebSocket responses deliver response.completed event',async(t)=>{
- if(typeof WebSocket==='undefined'){t.skip('No native WebSocket client');return;}
+test('WebSocket responses stream to completion with a valid upstream SSE stream',async t=>{
+ const assert=(await import('node:assert/strict')).default;
+ const {Readable}=await import('node:stream');
+ const http=await import('node:http');
+ const {once}=await import('node:events');
+ const {acceptResponsesWebSocket}=await import('../responses-socket.mjs');
+ const model='gpt-5.6-think-deeper';
+ const frames=[
+  'data: '+JSON.stringify({id:'chat_mock',object:'chat.completion.chunk',model,choices:[{index:0,delta:{role:'assistant',content:'Hello '},finish_reason:null}]})+'\n\n',
+  'data: '+JSON.stringify({id:'chat_mock',object:'chat.completion.chunk',model,choices:[{index:0,delta:{content:'world'},finish_reason:null}]})+'\n\n',
+  'data: '+JSON.stringify({id:'chat_mock',object:'chat.completion.chunk',model,choices:[{index:0,delta:{},finish_reason:'stop'}]})+'\n\n',
+  'data: [DONE]\n\n',
+ ];
  const server=http.createServer();
- server.on('upgrade',(req,socket,head)=>acceptResponsesWebSocket(req,socket,head,{owner:'ws-owner',postChat:fakeChat}));
+ server.on('upgrade',(req,socket,head)=>acceptResponsesWebSocket(req,socket,head,{
+  owner:'legacy-ws-regression',postChat:async chat=>{
+   assert.equal(chat.stream,true);
+   return new Response(Readable.toWeb(Readable.from(frames.map(x=>Buffer.from(x)))),{status:200,headers:{'content-type':'text/event-stream'}});
+  }
+ }));
  server.listen(0,'127.0.0.1');await once(server,'listening');
- const url=`ws://127.0.0.1:${server.address().port}/v1/responses`;
- const ws=new WebSocket(url);t.after(()=>{ws.close();server.close();});
+ const ws=new WebSocket('ws://127.0.0.1:'+server.address().port+'/v1/responses');
+ t.after(()=>{try{ws.close();}catch{}server.close();});
  await new Promise((resolve,reject)=>{ws.addEventListener('open',resolve,{once:true});ws.addEventListener('error',reject,{once:true});});
  const result=await Promise.race([
-   new Promise((resolve,reject)=>{
-     ws.addEventListener('message',ev=>{try{const e=JSON.parse(ev.data);if(e.type==='response.completed')resolve(e.response);else if(e.type==='error')reject(new Error(JSON.stringify(e.error)));}catch(e){reject(e);}});
-     ws.send(JSON.stringify({type:'response.create',model:'m365-copilot',input:'hello'}));
-   }),
-   new Promise((_,reject)=>setTimeout(()=>reject(Error('WebSocket timeout')),3500)),
+  new Promise((resolve,reject)=>{
+   ws.addEventListener('message',event=>{
+    try{
+     const value=JSON.parse(event.data);
+     if(value.type==='response.completed')resolve(value.response);
+     else if(value.type==='error')reject(Error(value.error?.message||'Unknown WebSocket error'));
+    }catch(error){reject(error);}
+   });
+   ws.send(JSON.stringify({type:'response.create',model,input:'hi',stream:true}));
+  }),
+  new Promise((_,reject)=>setTimeout(()=>reject(Error('WebSocket test timed out')),6000)),
  ]);
- assert.equal(result.output[0].content[0].text,'OK');
+ assert.equal(result.status,'completed');
+ assert.equal(result.output[0].content[0].text,'Hello world');
 });
 test('custom tool calls are returned as custom_tool_call events',async()=>{
  const tools=[{id:'call_abc',type:'function',function:{name:'apply_patch',arguments:'{"input":"*** Begin Patch"}'}}];
