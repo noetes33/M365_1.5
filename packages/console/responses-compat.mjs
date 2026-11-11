@@ -32,16 +32,61 @@ function cacheHistory(key,id,messages,tools=[],customNames=[]){
   while(responseHistory.size>=MAX_HISTORY)responseHistory.delete(responseHistory.keys().next().value);
   responseHistory.set(id,{owner:key,messages:structuredClone(messages),tools:structuredClone(tools),customNames:[...customNames],at:time});
 }
+/** Unpack Responses-Lite tools into names accepted by Chat Completions.
+ * The namespace is kept separately so tool calls can be restored verbatim.
+ */
+function normalizeTools(definitions){
+  if(!Array.isArray(definitions))throw bad('tools must be an array');
+  const expanded=[];
+  function add(t,namespace=''){
+    if(!t||typeof t!=='object')throw bad('Malformed tool definition');
+    if(t.type==='namespace'){
+      if(namespace)throw bad('Nested tool namespace is not supported');
+      if(typeof t.name!=='string'||!t.name||!Array.isArray(t.tools))throw bad('Invalid tool namespace');
+      for(const nested of t.tools)add(nested,t.name);
+      return;
+    }
+    if(t.type!=='function'&&t.type!=='custom'){
+      throw bad('Unsupported tool type '+String(t.type));
+    }
+    if(typeof t.name!=='string'||!t.name||!/^[-a-zA-Z0-9_.]{1,128}$/.test(t.name))
+      throw bad('Invalid tool name');
+    const fullName=namespace ? namespace+'__'+t.name : t.name;
+    if(fullName.length>128)throw bad('Namespaced tool name is too long');
+    expanded.push({type:t.type,name:fullName,originalName:t.name,namespace,description:t.description||'',parameters:t.parameters||{type:'object',properties:{}}});
+  }
+  for(const t of definitions)add(t);
+  if(expanded.length>256)throw bad('Too many tools (max 256)');
+  // Codex may repeat the same namespace definitions on successive Responses-Lite turns.
+  // The latest declaration wins, while still preserving the original input order.
+  const named=new Map();
+  for(const t of expanded)named.set(t.name,t);
+  return [...named.values()];
+}
+function formatUpstreamName(item){
+  const namespace=typeof item.namespace==='string'&&item.namespace?item.namespace+'__':'';
+  return namespace ? namespace+String(item.name||'') : String(item.name||'');
+}
 export function responsesToChat(req,owner='local'){
   if(!req||typeof req!=='object'||typeof req.model!=='string'||!req.model.trim())throw bad('model is required');
   const prev=getHistory(owner,req.previous_response_id);
   let messages=prev.messages;
+  let activeTools=req.tools===undefined?prev.tools:(Array.isArray(req.tools)?req.tools:null);
+  if(activeTools===null)throw bad('tools must be an array');
   if(req.instructions)messages.push({role:'system',content:String(req.instructions)});
   const input=typeof req.input==='string'?[{type:'message',role:'user',content:req.input}]:req.input;
   if(!Array.isArray(input))throw bad('input must be a string or array');
   for(const item of input){
     if(!item||typeof item!=='object')continue;
     const type=item.type||'message';
+    if(type==='additional_tools'){
+      if(item.role && item.role!=='developer')throw bad('additional_tools role must be developer');
+      if(!Array.isArray(item.tools))throw bad('additional_tools.tools must be an array');
+      // Responses-Lite places its executable tools in input rather than the top-level tools field.
+      // Keep them for the next turn instead of silently dropping these definitions.
+      activeTools=[...activeTools,...item.tools];
+      continue;
+    }
     if(type==='message'){
       const role=String(item.role||'user');
       if(!['user','assistant','system','developer','tool'].includes(role))throw bad('Unsupported role '+role);
@@ -50,7 +95,7 @@ export function responsesToChat(req,owner='local'){
       const callId=String(item.call_id||item.id||'');
       if(!callId)throw bad('Function call lacks call_id');
       const args=type==='custom_tool_call' ? JSON.stringify({input:String(item.input??'')}) : String(item.arguments??'{}');
-      messages.push({role:'assistant',content:null,tool_calls:[{id:callId,type:'function',function:{name:String(item.name||''),arguments:args}}]});
+      messages.push({role:'assistant',content:null,tool_calls:[{id:callId,type:'function',function:{name:formatUpstreamName(item),arguments:args}}]});
     }else if(type==='function_call_output'||type==='custom_tool_call_output'){
       if(!item.call_id)throw bad('Tool result lacks call_id');
       messages.push({role:'tool',tool_call_id:String(item.call_id),content:textContent(item.output)});
@@ -59,29 +104,31 @@ export function responsesToChat(req,owner='local'){
     }else throw bad('Unsupported input item type '+type);
   }
   if(!messages.length)throw bad('Nonempty input is required');
-  const tools=[];const customNames=new Set();
-  const submittedTools=req.tools===undefined?prev.tools:(Array.isArray(req.tools)?req.tools:null);
-  if(submittedTools===null)throw bad('tools must be an array');
-  for(const t of submittedTools){
-    if(t.type==='function')tools.push({type:'function',function:{name:t.name,description:t.description||'',parameters:t.parameters||{type:'object',properties:{}}}});
-    else if(t.type==='custom'){
+  const tools=[];const customNames=new Set(),namespaceMap=new Map();
+  // A Responses-Lite turn may contain both req.tools and input additional_tools.
+  // Convert the merged list once and preserve the original structure for continuations.
+  const normalized=normalizeTools(activeTools);
+  for(const t of normalized){
+    if(t.namespace)namespaceMap.set(t.name,{name:t.originalName,namespace:t.namespace});
+    if(t.type==='function')tools.push({type:'function',function:{name:t.name,description:t.description,parameters:t.parameters}});
+    else{
       customNames.add(t.name);
-      tools.push({type:'function',function:{name:t.name,description:t.description||'',parameters:{type:'object',properties:{input:{type:'string'}},required:['input']}}});
-    }else throw bad('Unsupported tool type '+String(t.type));
+      tools.push({type:'function',function:{name:t.name,description:t.description,parameters:{type:'object',properties:{input:{type:'string'}},required:['input']}}});
+    }
   }
-  if(req.tools===undefined)for(const name of prev.customNames)customNames.add(name);
+  const submittedTools=activeTools;
   const chat={model:req.model,messages,stream:false};
   if(tools.length)chat.tools=tools;
   if(req.tool_choice==='required'||req.tool_choice==='none'||req.tool_choice==='auto')chat.tool_choice=req.tool_choice;
   else if(req.tool_choice && typeof req.tool_choice==='object'){
     if(req.tool_choice.type==='function'||req.tool_choice.type==='custom'){
-      const name=String(req.tool_choice.name||'');
+      const name=(req.tool_choice.namespace ? String(req.tool_choice.namespace)+'__' : '')+String(req.tool_choice.name||'');
       if(!name||!tools.some(t=>t.function.name===name))throw bad('tool_choice refers to an unknown function');
       chat.tool_choice={type:'function',function:{name}};
     }else throw bad('Unsupported tool_choice type '+String(req.tool_choice.type));
   }
   if(chat.tool_choice==='required'&&!tools.length)throw bad('tool_choice required but no tools were supplied');
-  return {chat,customNames,submittedTools};
+  return {chat,customNames,submittedTools,namespaceMap};
 }
 export function chatToResponses(payload,request,owner='local'){
   if(!payload?.choices?.length)throw bad('Chat upstream returned no choices',502);
@@ -95,10 +142,11 @@ export function chatToResponses(payload,request,owner='local'){
       if(t.type!=='function')continue;
       const name=String(t.function?.name||'');
       const args=String(t.function?.arguments||'{}');
+      const ns=request.namespaceMap?.get(name);
       if(request.customNames?.has(name)){
         let input=args;try{input=JSON.parse(args)?.input??args;}catch{}
-        output.push({id:'ctc_'+randomUUID().replaceAll('-',''),type:'custom_tool_call',status:'completed',call_id:String(t.id),name,input:String(input)});
-      }else output.push({id:'fc_'+randomUUID().replaceAll('-',''),type:'function_call',status:'completed',call_id:String(t.id),name,arguments:args});
+        output.push({id:'ctc_'+randomUUID().replaceAll('-',''),type:'custom_tool_call',status:'completed',call_id:String(t.id),name:ns?.name||name,...(ns?{namespace:ns.namespace}:{}),input:String(input)});
+      }else output.push({id:'fc_'+randomUUID().replaceAll('-',''),type:'function_call',status:'completed',call_id:String(t.id),name:ns?.name||name,...(ns?{namespace:ns.namespace}:{}),arguments:args});
     }
   }
   const text=typeof message.content==='string'?message.content:Array.isArray(message.content)?message.content.map(p=>p?.text||'').join(''):'';
@@ -108,7 +156,7 @@ export function chatToResponses(payload,request,owner='local'){
   const required=choice==='required'||(choice&&typeof choice==='object'&&choice.function);
   if(required && !output.some(x=>x.type==='function_call'||x.type==='custom_tool_call'))
     throw bad('tool_call_required_but_missing: upstream returned text instead of a tool call',422);
-  if(choice&&typeof choice==='object'&&choice.function && !output.some(x=>(x.type==='function_call'||x.type==='custom_tool_call')&&x.name===choice.function.name))
+  if(choice&&typeof choice==='object'&&choice.function && !output.some(x=>(x.type==='function_call'||x.type==='custom_tool_call')&&((x.namespace?x.namespace+'__':'')+x.name)===choice.function.name))
     throw bad('tool_choice_function_mismatch: upstream called a different function',422);
   cacheHistory(owner,id,[...request.chat.messages,assistant],request.submittedTools,[...request.customNames]);
   return {id,object:'response',created_at,status:'completed',model:payload.model||request.chat.model,output,
@@ -159,6 +207,10 @@ export function warmupResponses(payload,owner){
     messages.splice(0,messages.length,...fake.chat.messages);
   }
   const id='resp_'+randomUUID().replaceAll('-','');
-  cacheHistory(owner,id,messages,payload.tools===undefined?previous.tools:payload.tools,payload.tools===undefined?previous.customNames:[]);
+  const definitions=payload.tools===undefined?previous.tools:payload.tools;
+  const extra=Array.isArray(payload.input)?payload.input.filter(x=>x?.type==='additional_tools').flatMap(x=>x.tools||[]):[];
+  const allTools=[...definitions,...extra];
+  normalizeTools(allTools);
+  cacheHistory(owner,id,messages,allTools,payload.tools===undefined?previous.customNames:[]);
   return {id,object:'response',created_at:now(),status:'completed',model:payload.model,output:[],previous_response_id:payload.previous_response_id||null,usage:null,error:null,incomplete_details:null};
 }
