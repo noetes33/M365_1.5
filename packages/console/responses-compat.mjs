@@ -21,20 +21,21 @@ function textContent(content){
   }).join('\n');
 }
 function getHistory(key,previous){
-  if(!previous)return [];
+  if(!previous)return {messages:[],tools:[],customNames:[]};
   const record=responseHistory.get(previous);
   if(!record||record.owner!==key||record.at+TTL<Date.now())throw bad('previous_response_not_found',404);
-  return structuredClone(record.messages);
+  return structuredClone({messages:record.messages,tools:record.tools||[],customNames:record.customNames||[]});
 }
-function cacheHistory(key,id,messages){
+function cacheHistory(key,id,messages,tools=[],customNames=[]){
   const time=Date.now();
   for(const [k,v] of responseHistory)if(v.at+TTL<time)responseHistory.delete(k);
   while(responseHistory.size>=MAX_HISTORY)responseHistory.delete(responseHistory.keys().next().value);
-  responseHistory.set(id,{owner:key,messages:structuredClone(messages),at:time});
+  responseHistory.set(id,{owner:key,messages:structuredClone(messages),tools:structuredClone(tools),customNames:[...customNames],at:time});
 }
 export function responsesToChat(req,owner='local'){
   if(!req||typeof req!=='object'||typeof req.model!=='string'||!req.model.trim())throw bad('model is required');
-  let messages=getHistory(owner,req.previous_response_id);
+  const prev=getHistory(owner,req.previous_response_id);
+  let messages=prev.messages;
   if(req.instructions)messages.push({role:'system',content:String(req.instructions)});
   const input=typeof req.input==='string'?[{type:'message',role:'user',content:req.input}]:req.input;
   if(!Array.isArray(input))throw bad('input must be a string or array');
@@ -48,7 +49,8 @@ export function responsesToChat(req,owner='local'){
     }else if(type==='function_call'||type==='custom_tool_call'){
       const callId=String(item.call_id||item.id||'');
       if(!callId)throw bad('Function call lacks call_id');
-      messages.push({role:'assistant',content:null,tool_calls:[{id:callId,type:'function',function:{name:String(item.name||''),arguments:String(item.arguments??item.input??'{}')}}]});
+      const args=type==='custom_tool_call' ? JSON.stringify({input:String(item.input??'')}) : String(item.arguments??'{}');
+      messages.push({role:'assistant',content:null,tool_calls:[{id:callId,type:'function',function:{name:String(item.name||''),arguments:args}}]});
     }else if(type==='function_call_output'||type==='custom_tool_call_output'){
       if(!item.call_id)throw bad('Tool result lacks call_id');
       messages.push({role:'tool',tool_call_id:String(item.call_id),content:textContent(item.output)});
@@ -58,17 +60,28 @@ export function responsesToChat(req,owner='local'){
   }
   if(!messages.length)throw bad('Nonempty input is required');
   const tools=[];const customNames=new Set();
-  for(const t of req.tools||[]){
+  const submittedTools=req.tools===undefined?prev.tools:(Array.isArray(req.tools)?req.tools:null);
+  if(submittedTools===null)throw bad('tools must be an array');
+  for(const t of submittedTools){
     if(t.type==='function')tools.push({type:'function',function:{name:t.name,description:t.description||'',parameters:t.parameters||{type:'object',properties:{}}}});
     else if(t.type==='custom'){
       customNames.add(t.name);
       tools.push({type:'function',function:{name:t.name,description:t.description||'',parameters:{type:'object',properties:{input:{type:'string'}},required:['input']}}});
     }else throw bad('Unsupported tool type '+String(t.type));
   }
+  if(req.tools===undefined)for(const name of prev.customNames)customNames.add(name);
   const chat={model:req.model,messages,stream:false};
   if(tools.length)chat.tools=tools;
-  if(req.tool_choice==='required'||req.tool_choice==='none')chat.tool_choice=req.tool_choice;
-  return {chat,customNames};
+  if(req.tool_choice==='required'||req.tool_choice==='none'||req.tool_choice==='auto')chat.tool_choice=req.tool_choice;
+  else if(req.tool_choice && typeof req.tool_choice==='object'){
+    if(req.tool_choice.type==='function'||req.tool_choice.type==='custom'){
+      const name=String(req.tool_choice.name||'');
+      if(!name||!tools.some(t=>t.function.name===name))throw bad('tool_choice refers to an unknown function');
+      chat.tool_choice={type:'function',function:{name}};
+    }else throw bad('Unsupported tool_choice type '+String(req.tool_choice.type));
+  }
+  if(chat.tool_choice==='required'&&!tools.length)throw bad('tool_choice required but no tools were supplied');
+  return {chat,customNames,submittedTools};
 }
 export function chatToResponses(payload,request,owner='local'){
   if(!payload?.choices?.length)throw bad('Chat upstream returned no choices',502);
@@ -91,7 +104,13 @@ export function chatToResponses(payload,request,owner='local'){
   const text=typeof message.content==='string'?message.content:Array.isArray(message.content)?message.content.map(p=>p?.text||'').join(''):'';
   if(text)output.push({id:'msg_'+randomUUID().replaceAll('-',''),type:'message',status:'completed',role:'assistant',content:[{type:'output_text',text,annotations:[]}]});
   if(!output.length)throw bad('Chat upstream returned neither text nor tool calls',502);
-  cacheHistory(owner,id,[...request.chat.messages,assistant]);
+  const choice=request.chat.tool_choice;
+  const required=choice==='required'||(choice&&typeof choice==='object'&&choice.function);
+  if(required && !output.some(x=>x.type==='function_call'||x.type==='custom_tool_call'))
+    throw bad('tool_call_required_but_missing: upstream returned text instead of a tool call',422);
+  if(choice&&typeof choice==='object'&&choice.function && !output.some(x=>(x.type==='function_call'||x.type==='custom_tool_call')&&x.name===choice.function.name))
+    throw bad('tool_choice_function_mismatch: upstream called a different function',422);
+  cacheHistory(owner,id,[...request.chat.messages,assistant],request.submittedTools,[...request.customNames]);
   return {id,object:'response',created_at,status:'completed',model:payload.model||request.chat.model,output,
     previous_response_id:request.previous_response_id||null,
     usage:payload.usage?{input_tokens:payload.usage.prompt_tokens||0,output_tokens:payload.usage.completion_tokens||0,total_tokens:payload.usage.total_tokens||0}:null,
@@ -132,13 +151,14 @@ export async function runResponses(payload,owner,postChat){
   return chatToResponses(result,{...req,previous_response_id:payload.previous_response_id},owner);
 }
 export function warmupResponses(payload,owner){
-  const messages=getHistory(owner,payload.previous_response_id);
+  const previous=getHistory(owner,payload.previous_response_id);
+  const messages=previous.messages;
   if(payload.instructions)messages.push({role:'system',content:String(payload.instructions)});
   if(payload.input && (!Array.isArray(payload.input)||payload.input.length)){
     const fake=responsesToChat({...payload,input:payload.input},owner);
     messages.splice(0,messages.length,...fake.chat.messages);
   }
   const id='resp_'+randomUUID().replaceAll('-','');
-  cacheHistory(owner,id,messages);
+  cacheHistory(owner,id,messages,payload.tools===undefined?previous.tools:payload.tools,payload.tools===undefined?previous.customNames:[]);
   return {id,object:'response',created_at:now(),status:'completed',model:payload.model,output:[],previous_response_id:payload.previous_response_id||null,usage:null,error:null,incomplete_details:null};
 }

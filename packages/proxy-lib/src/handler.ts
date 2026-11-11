@@ -826,6 +826,55 @@ export async function handleChatCompletion(
       log.info(`After forcing retry: hasToolCalls=${parsed.hasToolCalls}, count=${parsed.toolCalls.length}`);
     }
 
+    // A required tool choice is a protocol contract, not a request for a polite
+    // prose explanation. M365 sometimes says a client-provided tool is absent
+    // from *its* remote runtime. Clarify the caller-side dispatch once, without
+    // inventing a tool call or bypassing an upstream refusal.
+    const requiresTool = hasTools && (
+      body.tool_choice === "required" ||
+      (typeof body.tool_choice === "object" && body.tool_choice !== null && "function" in body.tool_choice)
+    );
+    if (requiresTool && !parsed.hasToolCalls) {
+      const selected = typeof body.tool_choice === "object" && body.tool_choice !== null && "function" in body.tool_choice
+        ? body.tool_choice.function.name
+        : null;
+      const offered = (body.tools ?? []).map(t => t.function.name);
+      log.info(`Required tool not emitted; retrying caller-side tool clarification (selected=${selected ?? "any"}, offered=${offered.length})`);
+      text = [
+        "This request has a required CLIENT-SIDE tool call that has not yet been emitted.",
+        `Available client-side functions: ${JSON.stringify(offered)}.`,
+        selected ? `The requested function is ${JSON.stringify(selected)}.` : "Choose one of the listed functions.",
+        "These tools are executed by the caller, not in Microsoft Copilot's environment.",
+        "If appropriate for the task, emit a single fenced tool call in the syntax and argument schema already provided;",
+        "do not claim you have executed it or invent a tool result. If a call is not possible, explain the reason."
+      ].join("\n");
+      const requiredRetry = await runBuffered();
+      if ("error" in requiredRetry) return { kind: "error", resp: requiredRetry.error };
+      conv.sentMessageCount = body.messages.length;
+      fullText = stopAtFabricatedResult(requiredRetry.fullText);
+      ({ parsed, judged } = parseReply(fullText, body.tools));
+      log.info(`Required-tool retry: hasToolCalls=${parsed.hasToolCalls}, count=${parsed.toolCalls.length}`);
+      if (!parsed.hasToolCalls) {
+        return { kind: "error", resp: jsonResponse(422, {
+          error: {
+            type: "tool_call_unavailable",
+            code: "tool_call_required_but_missing",
+            message: "The selected Microsoft Copilot model did not produce a structured tool call despite a required tool choice. It returned text instead; no tool was executed. Try a different model or check tool-agent availability."
+          }
+        }) };
+      }
+    }
+
+    // A named tool choice must never silently execute a different function.
+    const requiredName = body.tool_choice && typeof body.tool_choice === "object" && "function" in body.tool_choice
+      ? body.tool_choice.function.name : null;
+    if (requiredName && parsed.hasToolCalls && !parsed.toolCalls.some(tc => tc.function.name === requiredName)) {
+      log.info(`Named required tool mismatch: requested=${requiredName}, returned=${parsed.toolCalls.map(tc => tc.function.name).join(",")}`);
+      return { kind: "error", resp: jsonResponse(422, {
+        error: { type: "tool_call_unavailable", code: "tool_choice_function_mismatch", message: "The upstream model called a different tool than the required function; no client tool was executed." }
+      }) };
+    }
+
     // Never pass a remote M365 artifact off as a successful local edit. A retry
     // may merely transform a Teams URL into `sandbox:/mnt/data/...`; once the
     // configured attempts are exhausted, fail explicitly so the harness/user can

@@ -95,9 +95,22 @@ export function formatToolDefinitions(tools: ToolDef[], variantOverride?: string
 export function formatToolChoiceInstruction(toolChoice: ToolChoice): string {
   if (!toolChoice || toolChoice === "auto") return "";
   if (toolChoice === "none") return "\nDo NOT call tools. Text only.";
-  if (toolChoice === "required") return "\nYou MUST call at least one tool.";
+  if (toolChoice === "required") {
+    return (
+      "\nThe caller requires at least one tool call in this turn. " +
+      "These are CLIENT-PROVIDED tools: you do not execute them inside Microsoft Copilot. " +
+      "Emit a single tool-call fence using one of the exact function names and argument shapes listed above. " +
+      "The calling client executes your call and returns its real output in <tool_response>. " +
+      "Do not substitute a prose answer claiming that the tools are unavailable; " +
+      "if a call cannot be made, explain the specific reason instead of inventing a result."
+    );
+  }
   if (typeof toolChoice === "object" && toolChoice.function) {
-    return `\nYou MUST call "${toolChoice.function.name}".`;
+    return (
+      `\nThe calling client requires a tool call to "${toolChoice.function.name}" this turn. ` +
+      "Return exactly one correctly formatted tool-call fence using the schema above; " +
+      "the calling client, not you, executes the tool. Do not fabricate its result."
+    );
   }
   return "";
 }
@@ -195,7 +208,9 @@ export function formatMessages(
     parts.push(`<conversation_id>${conversationId}</conversation_id>`);
   }
 
-  const effectiveTools = tools ? maybeInjectReplyTool(tools) : tools;
+  // A synthetic text reply must not satisfy an explicit required real tool call.
+  const requireRealTool = toolChoice === "required" || (typeof toolChoice === "object" && !!toolChoice?.function);
+  const effectiveTools = tools ? (requireRealTool ? tools : maybeInjectReplyTool(tools)) : tools;
   const specMap = effectiveTools ? buildSpecMap(effectiveTools) : null;
   // The wrapper tags follow the framing variant: most keep the historical
   // `<system>` tags, but Claude Sonnet reads a `<system>` block inside a user
