@@ -437,6 +437,23 @@ async function gateway(req,res,route){
    let data;
    try{data=await input(req,8*1024*1024);}catch(e){return fail(res,e.status||400,e.message);}
    if(data.stream===true){
+     // The body may contain tokens or private file contents: log SHAPE ONLY.
+     const trace=crypto.randomBytes(5).toString('hex');
+     const started=Date.now();
+     const summary={
+       model:message(data.model,70),
+       input_types:Array.isArray(data.input)?data.input.map(x=>message(x?.type||'message',40)).slice(0,30):[typeof data.input],
+       tool_types:Array.isArray(data.tools)?data.tools.map(x=>message(x?.type||'unknown',40)).slice(0,30):[],
+       tool_count:Array.isArray(data.tools)?data.tools.length:0,
+       tool_choice:typeof data.tool_choice==='string'?message(data.tool_choice,30):(data.tool_choice?'object':'default'),
+       has_previous:!!data.previous_response_id,
+       fields:Object.keys(data).filter(x=>/^[a-zA-Z_]+$/.test(x)).slice(0,30)
+     };
+     const auditDiag=(outcome,code,details='')=>{
+       const entry=`trace=${trace} result=${outcome} code=${code} duration_ms=${Date.now()-started} shape=${JSON.stringify(summary)} details=${details}`;
+       console.info('[Codex SSE]',entry);
+       try{audit(db,u.id,'codex.responses.'+outcome,k.id,entry.slice(0,1400));}catch(logError){console.error('Codex diagnostics audit failure:',logError?.name||'unknown');}
+     };
      res.writeHead(200,{'Content-Type':'text/event-stream; charset=utf-8','Cache-Control':'no-store','Connection':'keep-alive','X-Accel-Buffering':'no'});
      // Upstream is non-streaming for manual-AT verification; keep the Codex SSE
      // connection alive while Microsoft finishes a reasoning response.
@@ -444,8 +461,17 @@ async function gateway(req,res,route){
      try{
        const result=await runResponses(data,k.id,chat=>postInternalChat(req.headers.authorization,chat));
        for(const event of responsesEvents(result))res.write('event: '+event.type+'\ndata: '+JSON.stringify(event)+'\n\n');
+       auditDiag('ok',200);
      }catch(e){
-       res.write('event: error\ndata: '+JSON.stringify({type:'error',error:{type:'gateway_error',message:message(e.message,300)}})+'\n\n');
+       const code=Number.isInteger(e?.status)?e.status:502;
+       const details=String(e?.message||e?.name||'unknown')
+         .replace(/m365_[a-f0-9]{64}/gi,'[API_KEY]')
+         .replace(/eyJ[a-zA-Z0-9_.-]{60,}/g,'[TOKEN]')
+         .replace(/1\.AQQA[a-zA-Z0-9_.-]{40,}/g,'[RT]')
+         .slice(0,220);
+       auditDiag('failed',code,details);
+       const failed={id:'resp_failed_'+trace,object:'response',created_at:Math.floor(Date.now()/1000),status:'failed',model:summary.model,output:[],error:{type:'gateway_error',code:'upstream_error',message:`M365 request ${trace}: ${details}`}};
+       if(!res.destroyed)res.write('event: response.failed\ndata: '+JSON.stringify({type:'response.failed',response:failed})+'\n\n');
      }finally{clearInterval(heartbeat);res.end();}
      return;
    }
