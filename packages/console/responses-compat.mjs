@@ -10,15 +10,38 @@ const TTL = 30 * 60 * 1000;
 const bad = (text,status=400)=>Object.assign(new Error(text),{status});
 const now = ()=>Math.floor(Date.now()/1000);
 
-function textContent(content){
+/** Preserve image data for the existing M365 core image upload path.
+ * File IDs require a storage backend and must never be silently discarded.
+ */
+function inputParts(content){
   if(typeof content==='string')return content;
   if(!Array.isArray(content))throw bad('Unsupported response input content');
-  return content.map(part=>{
-    if(typeof part==='string')return part;
-    if(part?.type==='input_text'||part?.type==='output_text'||part?.type==='text')return String(part.text||'');
-    if(part?.type==='input_image'||part?.type==='input_audio'||part?.type==='input_file')throw bad('This gateway currently supports text input only');
-    return '';
-  }).join('\n');
+  const parts=[];
+  for(const part of content){
+    if(typeof part==='string'){parts.push({type:'text',text:part});continue;}
+    if(part?.type==='input_text'||part?.type==='output_text'||part?.type==='text'){
+      parts.push({type:'text',text:String(part.text??'')});continue;
+    }
+    if(part?.type==='input_image'){
+      const raw=part.image_url??part.image?.url??part.url;
+      const value=typeof raw==='string'?raw:raw?.url;
+      if(part.file_id || !value)throw bad('image_file_id_not_supported: inline image_url or data URL is required',422);
+      if(!/^https:\/\//i.test(value)&&!/^data:image\/(png|jpeg|webp|gif);base64,[a-z0-9+/=]+$/i.test(value))
+        throw bad('Unsupported image_url format (HTTPS or data:image Base64 required)',422);
+      parts.push({type:'image_url',image_url:{url:value}});continue;
+    }
+    if(part?.type==='input_audio'||part?.type==='input_file'){
+      throw bad('media_type_not_supported: '+part.type,422);
+    }
+    throw bad('Unsupported content part type '+String(part?.type),422);
+  }
+  if(!parts.some(x=>x.type==='image_url'))return parts.map(x=>x.text).join('\n');
+  return parts;
+}
+function textContent(content){
+  const converted=inputParts(content);
+  if(typeof converted==='string')return converted;
+  return converted.filter(x=>x.type==='text').map(x=>x.text).join('\n');
 }
 function getHistory(key,previous){
   if(!previous)return {messages:[],tools:[],customNames:[]};
@@ -46,8 +69,17 @@ function normalizeTools(definitions){
       for(const nested of t.tools)add(nested,t.name);
       return;
     }
+    if(t.type==='web_search'||t.type==='web_search_preview'){
+      // M365 has its own search, but it does not implement OpenAI web_search_call events.
+      // Treat as a declared server capability, never an executable Codex function.
+      return;
+    }
+    if(t.type==='tool_search'){
+      // Tool discovery is handled by the client; existing additional_tools supply actual definitions.
+      return;
+    }
     if(t.type!=='function'&&t.type!=='custom'){
-      throw bad('Unsupported tool type '+String(t.type));
+      throw bad('Unsupported tool type '+String(t.type),422);
     }
     if(typeof t.name!=='string'||!t.name||!/^[-a-zA-Z0-9_.]{1,128}$/.test(t.name))
       throw bad('Invalid tool name');
@@ -90,7 +122,7 @@ export function responsesToChat(req,owner='local'){
     if(type==='message'){
       const role=String(item.role||'user');
       if(!['user','assistant','system','developer','tool'].includes(role))throw bad('Unsupported role '+role);
-      messages.push({role:role==='developer'?'system':role,content:textContent(item.content)});
+      messages.push({role:role==='developer'?'system':role,content:inputParts(item.content)});
     }else if(type==='function_call'||type==='custom_tool_call'){
       const callId=String(item.call_id||item.id||'');
       if(!callId)throw bad('Function call lacks call_id');
@@ -98,7 +130,12 @@ export function responsesToChat(req,owner='local'){
       messages.push({role:'assistant',content:null,tool_calls:[{id:callId,type:'function',function:{name:formatUpstreamName(item),arguments:args}}]});
     }else if(type==='function_call_output'||type==='custom_tool_call_output'){
       if(!item.call_id)throw bad('Tool result lacks call_id');
-      messages.push({role:'tool',tool_call_id:String(item.call_id),content:textContent(item.output)});
+      const content=inputParts(item.output);
+      if(Array.isArray(content)){
+        // Chat Completions tool messages have text-only content in this M365 core.
+        messages.push({role:'tool',tool_call_id:String(item.call_id),content:textContent(item.output)});
+        if(content.some(x=>x.type==='image_url')) messages.push({role:'user',content:[{type:'text',text:'Attached image from tool result '+item.call_id+':'},...content]});
+      }else messages.push({role:'tool',tool_call_id:String(item.call_id),content});
     }else if(type==='reasoning'){
       // Reasoning summaries are not a substitute for a user-visible assistant message.
     }else throw bad('Unsupported input item type '+type);
@@ -108,6 +145,12 @@ export function responsesToChat(req,owner='local'){
   // A Responses-Lite turn may contain both req.tools and input additional_tools.
   // Convert the merged list once and preserve the original structure for continuations.
   const normalized=normalizeTools(activeTools);
+  const searchRequested=activeTools.some(t=>t?.type==='web_search'||t?.type==='web_search_preview');
+  if(searchRequested){
+    // M365 built-in Bing search may be available independently of its tools API.
+    // This instruction is best effort, not proof that a web search occurred.
+    messages.push({role:'system',content:'When verified live web results are needed, use Microsoft Copilot native search if it is available; do not claim a search was performed unless results were actually returned.'});
+  }
   for(const t of normalized){
     if(t.namespace)namespaceMap.set(t.name,{name:t.originalName,namespace:t.namespace});
     if(t.type==='function')tools.push({type:'function',function:{name:t.name,description:t.description,parameters:t.parameters}});
@@ -125,7 +168,7 @@ export function responsesToChat(req,owner='local'){
       const name=(req.tool_choice.namespace ? String(req.tool_choice.namespace)+'__' : '')+String(req.tool_choice.name||'');
       if(!name||!tools.some(t=>t.function.name===name))throw bad('tool_choice refers to an unknown function');
       chat.tool_choice={type:'function',function:{name}};
-    }else throw bad('Unsupported tool_choice type '+String(req.tool_choice.type));
+    }else throw bad('Unsupported tool_choice type '+String(req.tool_choice.type),422);
   }
   if(chat.tool_choice==='required'&&!tools.length)throw bad('tool_choice required but no tools were supplied');
   return {chat,customNames,submittedTools,namespaceMap};
@@ -213,4 +256,9 @@ export function warmupResponses(payload,owner){
   normalizeTools(allTools);
   cacheHistory(owner,id,messages,allTools,payload.tools===undefined?previous.customNames:[]);
   return {id,object:'response',created_at:now(),status:'completed',model:payload.model,output:[],previous_response_id:payload.previous_response_id||null,usage:null,error:null,incomplete_details:null};
+}
+
+/** Commit completed native SSE stream to Responses conversation history. */
+export function saveStreamConversation(owner,id,request,assistant){
+  cacheHistory(owner,id,[...request.chat.messages,assistant],request.submittedTools,[...request.customNames]);
 }

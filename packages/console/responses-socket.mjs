@@ -3,8 +3,9 @@
  * This is independent of Microsoft ChatHub's separate outbound WebSocket.
  */
 import {createHash} from 'node:crypto';
-import {runResponses,responsesEvents,warmupResponses} from './responses-compat.mjs';
-const MAX_MESSAGE=8*1024*1024;
+import {responsesEvents,warmupResponses} from './responses-compat.mjs';
+import {streamResponses} from './responses-stream.mjs';
+const MAX_MESSAGE=24*1024*1024;
 const guid='258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 const frame=(opcode,payload)=>{
   const b=Buffer.isBuffer(payload)?payload:Buffer.from(payload||'');
@@ -37,8 +38,13 @@ export function acceptResponsesWebSocket(req,socket,head,{owner,postChat}){
     const old=lanes.get(lane)||Promise.resolve();
     const job=old.catch(()=>{}).then(async()=>{
       try{
-        const response=payload.generate===false?warmupResponses(payload,owner):await runResponses(payload,owner,postChat);
-        for(const item of responsesEvents(response))send(lane==='default'?item:{...item,stream_id:lane});
+        if(payload.generate===false){
+          const response=warmupResponses(payload,owner);
+          for(const item of responsesEvents(response))send(lane==='default'?item:{...item,stream_id:lane});
+        }else{
+          for await(const item of streamResponses(payload,owner,postChat))
+            send(lane==='default'?item:{...item,stream_id:lane});
+        }
       }catch(e){send({type:'error',error:{type:'gateway_error',message:String(e.message||'Request failed').slice(0,240)},...(lane==='default'?{}:{stream_id:lane})});}
     });
     lanes.set(lane,job);

@@ -9,6 +9,7 @@ import { requestUpstream, isEmbedded, embeddedState, configureAccounts } from '.
 import { accountStatus, accountReady, beginAuthorizedLogin, beginAutomatedLogin, hasAutoSecrets, importExternalMsalCache, importExternalAtRt, refreshExternalAtRt, retryImportedCacheVerification, unlinkAccount, shutdownWorkers } from './account-manager.mjs';
 import {saveCredentials,eraseCredentials} from './credential-vault.mjs';
 import {runResponses,responsesEvents} from './responses-compat.mjs';
+import {streamResponses} from './responses-stream.mjs';
 import {acceptResponsesWebSocket} from './responses-socket.mjs';
 import {updateOverview,queueUpdate} from './update-control.mjs';
 
@@ -427,15 +428,15 @@ async function postInternalChat(authHeader,chat){
   // upstream errors and usage logging. Do not create a second auth stack.
   return fetch(`http://127.0.0.1:${PORT}/v1/chat/completions`,{
     method:'POST',headers:{'Authorization':authHeader,'Content-Type':'application/json'},
-    body:JSON.stringify(chat),signal:AbortSignal.timeout(120000)
+    body:JSON.stringify(chat),signal:AbortSignal.timeout(chat.stream?300000:120000)
   });
 }
 async function gateway(req,res,route){
  const auth=authKey(req);if(!auth)return fail(res,401,'无效、禁用或过期的 API Key');
  const {k,u}=auth;
- if(route==='/v1/responses'&&req.method==='POST'){
+ if(['/v1/responses','/responses','/backend-api/codex/responses'].includes(route)&&req.method==='POST'){
    let data;
-   try{data=await input(req,8*1024*1024);}catch(e){return fail(res,e.status||400,e.message);}
+   try{data=await input(req,24*1024*1024);}catch(e){return fail(res,e.status||400,e.message);}
    if(data.stream===true){
      // The body may contain tokens or private file contents: log SHAPE ONLY.
      const trace=crypto.randomBytes(5).toString('hex');
@@ -459,8 +460,11 @@ async function gateway(req,res,route){
      // connection alive while Microsoft finishes a reasoning response.
      const heartbeat=setInterval(()=>{if(!res.destroyed)res.write(': keep-alive\n\n');},12000);
      try{
-       const result=await runResponses(data,k.id,chat=>postInternalChat(req.headers.authorization,chat));
-       for(const event of responsesEvents(result))res.write('event: '+event.type+'\ndata: '+JSON.stringify(event)+'\n\n');
+       for await(const event of streamResponses(data,k.id,chat=>postInternalChat(req.headers.authorization,chat))){
+         if(res.destroyed)break;
+         if(!res.write('event: '+event.type+'\ndata: '+JSON.stringify(event)+'\n\n'))
+           await new Promise(resolve=>res.once('drain',resolve));
+       }
        auditDiag('ok',200);
      }catch(e){
        const code=Number.isInteger(e?.status)?e.status:502;
@@ -544,13 +548,13 @@ export const server=http.createServer(async(req,res)=>{
    if(route==='/health'&&req.method==='GET')return json(res,200,{status:'ok',service:'m365-copilot-console',upstream:'in-process-or-local'});
    if(files[route]&&req.method==='GET'){const [filename,type]=files[route];res.writeHead(200,{'Content-Type':type,'Cache-Control':'no-store'});return res.end(readFileSync(path.join(ROOT,'public',filename)));}
    if(route.startsWith('/admin/api/'))return await adminRoutes(req,res,route.slice('/admin/api'.length),parts.slice(1));
-   if(route.startsWith('/v1/'))return await gateway(req,res,route);
+   if(route.startsWith('/v1/')||route==='/responses'||route==='/backend-api/codex/responses')return await gateway(req,res,route);
    return fail(res,404,'页面不存在');
  }catch(e){if(!res.headersSent)fail(res,e.status||500,e.status?e.message:'内部服务器错误');else res.destroy();if(!e.status)console.error('Unhandled:',e.stack);}
 });
 server.on('upgrade',(req,socket,head)=>{
   let route='';try{route=new URL(req.url||'/','http://local').pathname;}catch{}
-  if(route!=='/v1/responses')return socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n');
+  if(!['/v1/responses','/responses','/backend-api/codex/responses'].includes(route))return socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n');
   const auth=authKey(req);
   if(!auth)return socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
   acceptResponsesWebSocket(req,socket,head,{
